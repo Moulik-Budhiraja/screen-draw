@@ -1,6 +1,7 @@
 import Carbon.HIToolbox
 import Cocoa
 import ServiceManagement
+import Sparkle
 import WebKit
 
 // A hidden helper (no Dock icon, no menu bar item). ⌥G shows a transparent
@@ -42,11 +43,14 @@ final class OverlayPanel: NSPanel {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler,
+    SPUUpdaterDelegate, SPUStandardUserDriverDelegate {
     private var window: OverlayPanel!
     private var webView: WKWebView!
     private var hotKeyRef: EventHotKeyRef?
     private var isShown = false
+    private var updaterController: SPUStandardUpdaterController?
+    private var installUpdate: (() -> Void)?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Only one copy runs (e.g. a login item plus a manual launch).
@@ -63,7 +67,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             self, selector: #selector(windowDidResignKey),
             name: NSWindow.didResignKeyNotification, object: window)
         firstLaunchSetup()
+        startUpdater()
     }
+
+    // MARK: Updates
+
+    // There's no UI to offer updates in, so Sparkle checks and downloads them in
+    // the background (SUAutomaticallyUpdate in Info.plist) and the app installs
+    // a downloaded update the next time the overlay is hidden. Installing quits
+    // and relaunches the app, which takes about a second and shows nothing.
+    // Dev builds leave SUFeedURL out of Info.plist and don't update.
+    private func startUpdater() {
+        guard Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil else { return }
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true, updaterDelegate: self, userDriverDelegate: self)
+    }
+
+    func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
+                 immediateInstallationBlock: @escaping () -> Void) -> Bool {
+        NSLog("ScreenDraw: downloaded update \(item.displayVersionString)")
+        installUpdate = immediateInstallationBlock
+        installUpdateIfIdle()
+        return true
+    }
+
+    private func installUpdateIfIdle() {
+        guard !isShown, let install = installUpdate else { return }
+        installUpdate = nil
+        NSLog("ScreenDraw: installing update and relaunching")
+        install()
+    }
+
+    // Sparkle asks background apps to opt in to quiet reminders for updates it
+    // can't install silently (for example when installing needs a password).
+    var supportsGentleScheduledUpdateReminders: Bool { true }
 
     // MARK: First launch
 
@@ -183,6 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             guard let self, !self.isShown, self.window.isVisible else { return }
             self.window.orderOut(nil)
             NSLog("ScreenDraw: hidden")
+            self.installUpdateIfIdle()
         }
         webView.callAsyncJavaScript("if (window.SD) await SD.close(); return true;",
                                     arguments: [:], in: nil, in: .page) { _ in finish() }

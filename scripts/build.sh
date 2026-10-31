@@ -1,24 +1,42 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Builds build/ScreenDraw.app (universal: Apple silicon + Intel), ad-hoc signed.
 # Pass --install to copy it to ~/Applications and (re)start it.
-# VERSION and BUILD set the app's version (default 1.0 and 1).
-# scripts/release.sh builds on this to make the signed, notarized DMG.
+#
+# VERSION (1.2.3) and BUILD set the app's version. BUILD defaults to
+# X*100000000 + Y*100000 + Z*100, the scheme app-hosting uses. Releases come
+# from the app-hosting workflow (see apps.json), which runs this with both set
+# and does the real signing. Without VERSION this is a dev build: version
+# 0.0.0 and no update feed, so it never replaces itself with a release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION=${VERSION:-1.0}
-BUILD=${BUILD:-1}
+FEED_URL=https://apps.moulik.dev/screen-draw/appcast.xml
+# From `apps create`. Sparkle checks every update against it.
+PUBLIC_ED_KEY=UMOIAd1529xaEvQ3vsezoUNgNQOoHOytTgJfV+fdUU4=
+
+if [[ -n ${VERSION:-} ]]; then
+  [[ $VERSION =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "VERSION must look like 1.2.3" >&2; exit 1; }
+  BUILD=${BUILD:-$(( BASH_REMATCH[1] * 100000000 + BASH_REMATCH[2] * 100000 + BASH_REMATCH[3] * 100 ))}
+  feed_keys="<key>SUFeedURL</key><string>$FEED_URL</string>"
+else
+  VERSION=0.0.0
+  BUILD=0
+  feed_keys=""
+fi
 
 [ -d node_modules ] || npm install
 node scripts/build-web.mjs
 arch=(--arch arm64 --arch x86_64)
 swift build -c release "${arch[@]}"
-bin="$(swift build -c release "${arch[@]}" --show-bin-path)/ScreenDraw"
+products=$(swift build -c release "${arch[@]}" --show-bin-path)
 
 APP=build/ScreenDraw.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$bin" "$APP/Contents/MacOS/ScreenDraw"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+cp "$products/ScreenDraw" "$APP/Contents/MacOS/ScreenDraw"
+# ditto keeps the framework's symlinks, which its signature covers.
+ditto "$products/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/ScreenDraw"
 cp build/overlay.html "$APP/Contents/Resources/overlay.html"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp web/fonts/OFL.txt "$APP/Contents/Resources/Excalifont-OFL.txt"
@@ -41,6 +59,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSHumanReadableCopyright</key><string>© $(date +%Y) Moulik Budhiraja</string>
+  $feed_keys
+  <key>SUPublicEDKey</key><string>$PUBLIC_ED_KEY</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>21600</integer>
 </dict>
 </plist>
 PLIST

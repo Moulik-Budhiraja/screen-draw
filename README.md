@@ -52,13 +52,23 @@ Needs Xcode and Node.
 
 ## Release
 
+Releases are published to https://apps.moulik.dev/screen-draw/ with
+[app-hosting](https://github.com/Moulik-Budhiraja/app-hosting). Tag a commit on main:
+
 ```bash
-APPLE_ISSUER_ID=<issuer id> ./scripts/release.sh 1.0
+git tag -a v1.2.3 -m "What changed" && git push origin v1.2.3
 ```
 
-Builds `dist/ScreenDraw-1.0.dmg`, signed with the Developer ID and notarized, using the
-certificate and App Store Connect key in `~/.config/predictor-release` (the same ones hobola
-releases with). `SIGN_ONLY=1` skips notarization. The icon is drawn by `scripts/make-icon.mjs`;
+The release workflow builds the app with `VERSION=1.2.3`, signs it with the Developer ID,
+notarizes it, makes the DMG and publishes it. The tag message becomes the release notes.
+`./scripts/release.sh 1.2.3` does the same from this Mac when the runner is down.
+
+Installed copies update themselves with Sparkle. They check every 6 hours, download new
+versions in the background and install them the next time the drawing layer is closed,
+which relaunches the app in about a second. Dev builds (`./scripts/build.sh` without
+`VERSION`) are version 0.0.0 and don't check for updates.
+
+The icon is drawn by `scripts/make-icon.mjs`;
 run `./scripts/make-icon.sh` after changing it.
 
 Excalifont is © Excalidraw, licensed under the SIL Open Font License (bundled as `Excalifont-OFL.txt`).

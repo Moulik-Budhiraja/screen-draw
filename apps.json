@@ -1,0 +1,16 @@
+{
+  "app": "screen-draw",
+  "remote": {
+    "name": "moulik",
+    "url": "https://apps.moulik.dev"
+  },
+  "updater": "sparkle",
+  "tagPrefix": "v",
+  "build": {
+    "kind": "native",
+    "command": "./scripts/build.sh",
+    "app": "build/ScreenDraw.app",
+    "entitlements": null,
+    "dmgName": "ScreenDraw"
+  }
+}
