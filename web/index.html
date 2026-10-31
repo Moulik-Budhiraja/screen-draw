@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScreenDraw</title>
+<style>
+/*FONTS*/
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+body.test {
+  background: #f1f3f5 linear-gradient(135deg, #e9ecef 25%, transparent 25%, transparent 50%, #e9ecef 50%, #e9ecef 75%, transparent 75%) 0 0 / 40px 40px;
+}
+body.test.dark { background: #121212; }
+canvas { position: fixed; inset: 0; display: block; touch-action: none; }
+.text-editor {
+  position: fixed;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  word-break: normal;
+  overflow-wrap: break-word;
+  min-width: 1px;
+  -webkit-user-select: text;
+  user-select: text;
+  caret-color: currentColor;
+}
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="0"></canvas>
+<script>
+  // ?test gives the page a visible background when opened in a normal browser.
+  const q = new URLSearchParams(location.search);
+  if (q.has('test')) document.body.classList.add('test');
+  if (q.get('test') === 'dark') document.body.classList.add('dark');
+</script>
+<!--SCRIPT-->
+</body>
+</html>

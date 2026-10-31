@@ -1,0 +1,12 @@
+node_modules/
+build/
+dist/
+.build/
+.swiftpm/
+.DS_Store
+.claude/worktrees/
+.claude/settings.local.json
+# Signing material never lives in the repo.
+*.p12
+*.p8
+*.keychain-db
