@@ -61,6 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             NSApp.terminate(nil)
             return
         }
+        let info = Bundle.main.infoDictionary ?? [:]
+        NSLog("ScreenDraw: started version \(info["CFBundleShortVersionString"] ?? "?") (build \(info["CFBundleVersion"] ?? "?"))")
         createWindow()
         registerHotKey()
         NotificationCenter.default.addObserver(
