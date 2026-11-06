@@ -1,5 +1,6 @@
 import Carbon.HIToolbox
 import Cocoa
+import ScreenCaptureKit
 import ServiceManagement
 import Sparkle
 import WebKit
@@ -47,6 +48,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     SPUUpdaterDelegate, SPUStandardUserDriverDelegate {
     private var window: OverlayPanel!
     private var webView: WKWebView!
+    // The screen as it was when ⌥G opened the overlay. Tab shows it behind the
+    // drawing instead of the live screen.
+    private var frozenView: NSView!
+    private var snapshot: CGImage?
+    private var showsSnapshot = false
+    private var isCapturing = false
+    private var showCount = 0
     private var hotKeyRef: EventHotKeyRef?
     private var isShown = false
     private var updaterController: SPUStandardUpdaterController?
@@ -149,7 +157,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         webView.setValue(false, forKey: "drawsBackground")
         webView.underPageBackgroundColor = .clear
         webView.autoresizingMask = [.width, .height]
-        window.contentView = webView
+
+        let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        frozenView = NSView(frame: container.bounds)
+        frozenView.wantsLayer = true
+        frozenView.layer?.contentsGravity = .resize
+        frozenView.autoresizingMask = [.width, .height]
+        frozenView.isHidden = true
+        container.addSubview(frozenView)
+        container.addSubview(webView)
+        window.contentView = container
 
         if let url = Bundle.main.url(forResource: "overlay", withExtension: "html") {
             webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
@@ -201,7 +218,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         guard !isShown else { return }
         isShown = true
         window.ignoresMouseEvents = false
-        if let screen = screenUnderMouse() { window.setFrame(screen.frame, display: false) }
+        clearSnapshot()
+        let screen = screenUnderMouse()
+        if let screen { window.setFrame(screen.frame, display: false) }
+        // Only capture once the user has allowed screen recording (asked on
+        // their first Tab), so people who never use Tab never see the prompt.
+        if let screen, CGPreflightScreenCaptureAccess() { captureSnapshot(of: screen) }
         webView.evaluateJavaScript("window.SD && SD.show()") { [weak self] _, _ in
             guard let self, self.isShown else { return }
             self.window.makeKeyAndOrderFront(nil)
@@ -221,6 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         let finish = { [weak self] in
             guard let self, !self.isShown, self.window.isVisible else { return }
             self.window.orderOut(nil)
+            self.clearSnapshot()
             NSLog("ScreenDraw: hidden")
             self.installUpdateIfIdle()
         }
@@ -242,7 +265,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         case "exit": hide()
         case "editing": window.isEditingText = body["value"] as? Bool ?? false
         case "history": if let json = body["json"] as? String { saveHistory(json) }
+        case "background": toggleSnapshot()
         default: break
+        }
+    }
+
+    // MARK: Frozen background (Tab)
+
+    private func clearSnapshot() {
+        showCount += 1
+        snapshot = nil
+        showsSnapshot = false
+        isCapturing = false
+        updateFrozenView()
+    }
+
+    private func updateFrozenView() {
+        frozenView.layer?.contents = showsSnapshot ? snapshot : nil
+        frozenView.isHidden = !(showsSnapshot && snapshot != nil)
+    }
+
+    private func toggleSnapshot() {
+        guard #available(macOS 14.0, *) else { return }
+        guard CGPreflightScreenCaptureAccess() else {
+            requestScreenAccess()
+            return
+        }
+        showsSnapshot.toggle()
+        // Access was granted after this overlay opened: take the shot now.
+        if showsSnapshot, snapshot == nil, let screen = window.screen { captureSnapshot(of: screen) }
+        updateFrozenView()
+    }
+
+    // The first time, macOS shows its own prompt. After that it stays silent,
+    // so open the Screen Recording settings instead.
+    private func requestScreenAccess() {
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "askedScreenAccess") {
+            hide()
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                NSWorkspace.shared.open(url)
+            }
+        } else {
+            defaults.set(true, forKey: "askedScreenAccess")
+            CGRequestScreenCaptureAccess()
+        }
+    }
+
+    private func captureSnapshot(of screen: NSScreen) {
+        guard #available(macOS 14.0, *), !isCapturing,
+              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        else { return }
+        isCapturing = true
+        let count = showCount
+        let width = Int(screen.frame.width * screen.backingScaleFactor)
+        let height = Int(screen.frame.height * screen.backingScaleFactor)
+        let finish: (CGImage?, Error?) -> Void = { [weak self] image, error in
+            DispatchQueue.main.async {
+                guard let self, self.showCount == count else { return }
+                self.isCapturing = false
+                if let error { NSLog("ScreenDraw: screen capture failed: \(error)") }
+                self.snapshot = image
+                self.updateFrozenView()
+            }
+        }
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
+            guard let content, let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                finish(nil, error)
+                return
+            }
+            // Leave our own overlay out of the picture.
+            let me = content.applications.filter { $0.processID == getpid() }
+            let filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
+            let config = SCStreamConfiguration()
+            config.width = width
+            config.height = height
+            config.showsCursor = false
+            SCScreenshotManager.captureImage(contentFilter: filter, configuration: config, completionHandler: finish)
         }
     }
 

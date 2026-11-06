@@ -20,6 +20,7 @@ An invisible macOS helper for drawing on top of your screen, in Excalidraw's sty
 | 1–5 | Stroke: red, blue, green, black, white |
 | F1–F5 | Fill (a tint of that color); F6 clears. Shift+1–5 / Shift+6 do the same if your F-keys are media keys |
 | X | Toggle solid / dotted |
+| Tab | Draw over the live screen or over a still of it from when you pressed ⌥G (asks for Screen Recording the first time) |
 | ⌘G | Group, or ungroup if a group is selected |
 | ⌘↑ / ⌘↓ | Bring forward / send backward (add ⇧ or ⌥ for front / back) |
 | ⌘Z / ⌘⇧Z | Undo / redo |
