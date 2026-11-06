@@ -16,6 +16,7 @@ let package = Package(
             path: "Sources/ScreenDraw",
             linkerSettings: [
                 .linkedFramework("Carbon"),
+                .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("WebKit"),
             ]
         ),

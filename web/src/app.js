@@ -1471,6 +1471,13 @@ function onKeyDown(e) {
   const mod = e.metaKey || e.ctrlKey;
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
 
+  // Tab: draw over the live screen or over a still of it from when ⌥G opened.
+  if (e.key === 'Tab' && !mod && !e.altKey) {
+    e.preventDefault();
+    bridge({ type: 'background' });
+    return;
+  }
+
   if (mod) {
     let handled = true;
     if (key === 'z' && e.shiftKey) redo();
