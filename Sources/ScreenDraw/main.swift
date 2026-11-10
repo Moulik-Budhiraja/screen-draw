@@ -48,11 +48,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     SPUUpdaterDelegate, SPUStandardUserDriverDelegate {
     private var window: OverlayPanel!
     private var webView: WKWebView!
-    // The screen as it was when ⌥G opened the overlay. Tab shows it behind the
-    // drawing instead of the live screen.
+    // The screen as it was when ⌥G opened the overlay, shown behind the drawing
+    // until Tab switches to the live screen. A board saved to history keeps its
+    // still in a file named after `sessionShot`, so recalling the board brings
+    // the screen it was drawn on back with it.
     private var frozenView: NSView!
     private var snapshot: CGImage?
-    private var showsSnapshot = false
+    private var sessionShot = ""
+    private var sessionShotWanted = false
+    private var sessionShotSaved = false
+    // The still behind the board on screen: this session's, or a recalled
+    // board's own (`boardShot`), with its pixels per point.
+    private var shown: CGImage?
+    private var shownScale: CGFloat = 1
+    private var boardShot: String?
+    private var showsSnapshot = true
     private var isCapturing = false
     private var showCount = 0
     private var hotKeyRef: EventHotKeyRef?
@@ -104,8 +114,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private func installUpdateIfIdle() {
         guard !isShown, let install = installUpdate else { return }
         installUpdate = nil
-        NSLog("ScreenDraw: installing update and relaunching")
-        install()
+        // Let a board or still that is being written finish first.
+        historyQueue.async { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard !self.isShown else {
+                    self.installUpdate = install
+                    return
+                }
+                NSLog("ScreenDraw: installing update and relaunching")
+                install()
+            }
+        }
     }
 
     // Sparkle asks background apps to opt in to quiet reminders for updates it
@@ -162,7 +182,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         frozenView = NSView(frame: container.bounds)
         frozenView.wantsLayer = true
         frozenView.layer?.contentsGravity = .resize
-        frozenView.autoresizingMask = [.width, .height]
         frozenView.isHidden = true
         container.addSubview(frozenView)
         container.addSubview(webView)
@@ -191,14 +210,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         return json
     }
 
-    private func saveHistory(_ json: String) {
+    private var shotsURL: URL { historyURL.deletingLastPathComponent().appendingPathComponent("stills") }
+
+    // A still's name is a UUID plus the pixels per point it was taken at,
+    // like "…@2x". Names come from the page, so anything else is refused.
+    private func shotURL(_ id: String) -> URL? {
+        guard id.range(of: "^[0-9A-F-]{36}@[1-9]x$", options: .regularExpression) != nil else { return nil }
+        return shotsURL.appendingPathComponent(id + ".heic")
+    }
+
+    // `shots` are the stills the saved boards use. Others are deleted.
+    private func saveHistory(_ json: String, shots: [String]) {
         let url = historyURL
+        let dir = shotsURL
+        let keep = Set(shots + [sessionShot])
         historyQueue.async {
             do {
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try Data(json.utf8).write(to: url, options: .atomic)
             } catch {
                 NSLog("ScreenDraw: could not save history: \(error)")
+                return
+            }
+            let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            for file in files where !keep.contains(file.deletingPathExtension().lastPathComponent) {
+                try? FileManager.default.removeItem(at: file)
             }
         }
     }
@@ -220,11 +256,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         window.ignoresMouseEvents = false
         clearSnapshot()
         let screen = screenUnderMouse()
-        if let screen { window.setFrame(screen.frame, display: false) }
-        // Only capture once the user has allowed screen recording (asked on
-        // their first Tab), so people who never use Tab never see the prompt.
-        if let screen, CGPreflightScreenCaptureAccess() { captureSnapshot(of: screen) }
-        webView.evaluateJavaScript("window.SD && SD.show()") { [weak self] _, _ in
+        if let screen {
+            window.setFrame(screen.frame, display: false)
+            sessionShot = "\(UUID().uuidString)@\(max(1, Int(screen.backingScaleFactor)))x"
+            if CGPreflightScreenCaptureAccess() {
+                captureSnapshot(of: screen)
+            } else if #available(macOS 14.0, *), !UserDefaults.standard.bool(forKey: "askedScreenAccess") {
+                // Without access the overlay draws over the live screen.
+                requestScreenAccess()
+            }
+        }
+        webView.evaluateJavaScript("window.SD && SD.show('\(sessionShot)')") { [weak self] _, _ in
             guard let self, self.isShown else { return }
             self.window.makeKeyAndOrderFront(nil)
             self.window.makeFirstResponder(self.webView)
@@ -264,8 +306,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         switch type {
         case "exit": hide()
         case "editing": window.isEditingText = body["value"] as? Bool ?? false
-        case "history": if let json = body["json"] as? String { saveHistory(json) }
+        case "history":
+            guard let json = body["json"] as? String else { break }
+            let shots = body["shots"] as? [String] ?? []
+            if shots.contains(sessionShot) {
+                sessionShotWanted = true
+                saveSessionShot()
+            }
+            saveHistory(json, shots: shots)
         case "background": toggleSnapshot()
+        case "board": showBoardShot(body["shot"] as? String)
         default: break
         }
     }
@@ -275,14 +325,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private func clearSnapshot() {
         showCount += 1
         snapshot = nil
-        showsSnapshot = false
+        sessionShot = ""
+        sessionShotWanted = false
+        sessionShotSaved = false
+        shown = nil
+        boardShot = nil
+        showsSnapshot = true
         isCapturing = false
         updateFrozenView()
     }
 
+    // The still keeps the size it was taken at, from the top left like the
+    // drawing, so the two line up even on a screen of another size.
     private func updateFrozenView() {
-        frozenView.layer?.contents = showsSnapshot ? snapshot : nil
-        frozenView.isHidden = !(showsSnapshot && snapshot != nil)
+        let image = showsSnapshot ? shown : nil
+        frozenView.layer?.contents = image
+        frozenView.isHidden = image == nil
+        guard let image, let bounds = frozenView.superview?.bounds else { return }
+        let size = NSSize(width: CGFloat(image.width) / shownScale, height: CGFloat(image.height) / shownScale)
+        frozenView.frame = NSRect(x: 0, y: bounds.height - size.height, width: size.width, height: size.height)
+    }
+
+    private func showSessionShot() {
+        shown = snapshot
+        shownScale = CGFloat(Int(sessionShot.suffix(2).prefix(1)) ?? 1)
+        updateFrozenView()
+    }
+
+    // A recalled board shows the still it was drawn on. A board without one
+    // (or a new board) shows this session's.
+    private func showBoardShot(_ id: String?) {
+        boardShot = id == sessionShot ? nil : id
+        guard let id = boardShot, let url = shotURL(id) else {
+            boardShot = nil
+            showSessionShot()
+            return
+        }
+        let count = showCount
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let options = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+            let image = CGImageSourceCreateWithURL(url as CFURL, nil)
+                .flatMap { CGImageSourceCreateImageAtIndex($0, 0, options) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.showCount == count, self.boardShot == id else { return }
+                guard let image else {
+                    self.boardShot = nil
+                    self.showSessionShot()
+                    return
+                }
+                self.shown = image
+                self.shownScale = CGFloat(Int(id.suffix(2).prefix(1)) ?? 1)
+                self.updateFrozenView()
+            }
+        }
+    }
+
+    // Written once a saved board uses it, whether or not it was showing.
+    private func saveSessionShot() {
+        guard sessionShotWanted, !sessionShotSaved, let image = snapshot, let url = shotURL(sessionShot) else { return }
+        sessionShotSaved = true
+        historyQueue.async {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let quality = [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary
+            guard let file = CGImageDestinationCreateWithURL(url as CFURL, "public.heic" as CFString, 1, nil) else {
+                NSLog("ScreenDraw: could not save the still")
+                return
+            }
+            CGImageDestinationAddImage(file, image, quality)
+            if !CGImageDestinationFinalize(file) { NSLog("ScreenDraw: could not save the still") }
+        }
     }
 
     private func toggleSnapshot() {
@@ -291,9 +402,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             requestScreenAccess()
             return
         }
-        showsSnapshot.toggle()
         // Access was granted after this overlay opened: take the shot now.
-        if showsSnapshot, snapshot == nil, let screen = window.screen { captureSnapshot(of: screen) }
+        if snapshot == nil, shown == nil, let screen = window.screen {
+            showsSnapshot = true
+            captureSnapshot(of: screen)
+            return
+        }
+        showsSnapshot.toggle()
         updateFrozenView()
     }
 
@@ -326,7 +441,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 self.isCapturing = false
                 if let error { NSLog("ScreenDraw: screen capture failed: \(error)") }
                 self.snapshot = image
-                self.updateFrozenView()
+                self.saveSessionShot()
+                if self.boardShot == nil { self.showSessionShot() }
             }
         }
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in

@@ -1471,7 +1471,7 @@ function onKeyDown(e) {
   const mod = e.metaKey || e.ctrlKey;
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
 
-  // Tab: draw over the live screen or over a still of it from when ⌥G opened.
+  // Tab: draw over the still of the screen from when ⌥G opened, or the live screen.
   if (e.key === 'Tab' && !mod && !e.altKey) {
     e.preventDefault();
     bridge({ type: 'background' });
@@ -1580,6 +1580,7 @@ const boards = {
   list: Array.isArray(window.__SD_HISTORY) ? window.__SD_HISTORY.filter((b) => Array.isArray(b?.elements)) : [],
   index: null, // position in `list` being shown, or null for a fresh board
   base: '[]', // the shown board as it was loaded, to tell whether it was edited
+  shot: null, // name of the still of the screen taken when the overlay opened
 };
 
 if (!window.__SD_HISTORY) {
@@ -1592,7 +1593,8 @@ if (!window.__SD_HISTORY) {
 
 const persistBoards = () => {
   const json = JSON.stringify(boards.list);
-  if (!bridge({ type: 'history', json })) {
+  const shots = [...new Set(boards.list.map((b) => b.shot).filter(Boolean))];
+  if (!bridge({ type: 'history', json, shots })) {
     try {
       localStorage.setItem('sd-history', json);
     } catch {
@@ -1610,7 +1612,12 @@ const saveBoard = () => {
   const elements = S.elements.filter((el) => el.type !== 'text' || el.text.trim());
   const json = JSON.stringify(elements);
   if (!elements.length || json === boards.base) return;
-  boards.list.push({ savedAt: Date.now(), elements: JSON.parse(json) });
+  // A new board keeps the still it was drawn on; an edited copy keeps the
+  // original's.
+  const shot = boards.index === null ? boards.shot : boards.list[boards.index].shot;
+  const board = { savedAt: Date.now(), elements: JSON.parse(json) };
+  if (shot) board.shot = shot;
+  boards.list.push(board);
   if (boards.list.length > BOARD_LIMIT) boards.list.splice(0, boards.list.length - BOARD_LIMIT);
   boards.index = boards.list.length - 1;
   boards.base = json;
@@ -1627,6 +1634,7 @@ const showBoard = (index) => {
   S.erasing.clear();
   history.stack = [clone(elements)];
   history.index = 0;
+  bridge({ type: 'board', shot: (index !== null && boards.list[index].shot) || null });
   render();
 };
 
@@ -1682,8 +1690,9 @@ async function close() {
 window.SD = {
   reset,
   close,
-  show() {
+  show(shot) {
     reset();
+    boards.shot = shot || null;
     window.focus();
     canvas.focus();
   },
