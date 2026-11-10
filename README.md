@@ -20,7 +20,7 @@ An invisible macOS helper for drawing on top of your screen, in Excalidraw's sty
 | 1–5 | Stroke: red, blue, green, black, white |
 | F1–F5 | Fill (a tint of that color); F6 clears. Shift+1–5 / Shift+6 do the same if your F-keys are media keys |
 | X | Toggle solid / dotted |
-| Tab | Draw over the live screen or over a still of it from when you pressed ⌥G (asks for Screen Recording the first time) |
+| Tab | Draw over the live screen instead of the still of it from when you pressed ⌥G, and back. The still needs Screen Recording access, which the app asks for the first time you press ⌥G; without it you draw over the live screen |
 | ⌘G | Group, or ungroup if a group is selected |
 | ⌘↑ / ⌘↓ | Bring forward / send backward (add ⇧ or ⌥ for front / back) |
 | ⌘Z / ⌘⇧Z | Undo / redo |
@@ -28,7 +28,7 @@ An invisible macOS helper for drawing on top of your screen, in Excalidraw's sty
 | ⌘A | Select all |
 | Delete | Delete selection |
 | Scroll | Size of the next things you place (stroke, pen and font size together); placed things don't change |
-| ↑ / ↓ (nothing selected) | Older / newer artboards, like shell history. Editing an old board saves the edited copy as the newest; the original stays. Last 100 are kept in `~/Library/Application Support/ScreenDraw/history.json` |
+| ↑ / ↓ (nothing selected) | Older / newer artboards, like shell history. Editing an old board saves the edited copy as the newest; the original stays. Each board comes back over the still it was drawn on. Last 100 are kept in `~/Library/Application Support/ScreenDraw/history.json`, with their stills in `stills/` next to it |
 | Arrows (with a selection) | Nudge 1px (⇧ for 5px) |
 | ⌘⇧. / ⌘⇧, | Bigger / smaller text |
 | Enter | Edit the selected text or shape label |
