@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds build/ScreenDraw.app (universal: Apple silicon + Intel), ad-hoc signed.
+# Builds build/ScreenUtils.app (universal: Apple silicon + Intel), ad-hoc signed.
 # Pass --install to copy it to ~/Applications and (re)start it.
 #
 # VERSION (1.2.3) and BUILD set the app's version. BUILD defaults to
@@ -10,6 +10,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# The app was ScreenDraw. It keeps that bundle ID and update feed so copies
+# installed under the old name still update (and keep Screen Recording access).
 FEED_URL=https://apps.moulik.dev/screen-draw/appcast.xml
 # From `apps create`. Sparkle checks every update against it.
 PUBLIC_ED_KEY=UMOIAd1529xaEvQ3vsezoUNgNQOoHOytTgJfV+fdUU4=
@@ -30,13 +32,13 @@ arch=(--arch arm64 --arch x86_64)
 swift build -c release "${arch[@]}"
 products=$(swift build -c release "${arch[@]}" --show-bin-path)
 
-APP=build/ScreenDraw.app
+APP=build/ScreenUtils.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
-cp "$products/ScreenDraw" "$APP/Contents/MacOS/ScreenDraw"
+cp "$products/ScreenUtils" "$APP/Contents/MacOS/ScreenUtils"
 # ditto keeps the framework's symlinks, which its signature covers.
 ditto "$products/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
-install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/ScreenDraw"
+install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/ScreenUtils"
 cp build/overlay.html "$APP/Contents/Resources/overlay.html"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp web/fonts/OFL.txt "$APP/Contents/Resources/Excalifont-OFL.txt"
@@ -46,9 +48,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key><string>dev.moulik.screendraw</string>
-  <key>CFBundleName</key><string>ScreenDraw</string>
-  <key>CFBundleDisplayName</key><string>ScreenDraw</string>
-  <key>CFBundleExecutable</key><string>ScreenDraw</string>
+  <key>CFBundleName</key><string>ScreenUtils</string>
+  <key>CFBundleDisplayName</key><string>Screen Utils</string>
+  <key>CFBundleExecutable</key><string>ScreenUtils</string>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>dev.moulik.screenutils</string>
+    <key>CFBundleURLSchemes</key><array><string>screenutils</string></array>
+  </dict></array>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
@@ -73,9 +80,10 @@ echo "built $APP ($VERSION, build $BUILD)"
 
 if [ "${1:-}" = "--install" ]; then
   pkill -x ScreenDraw 2>/dev/null || true
+  pkill -x ScreenUtils 2>/dev/null || true
   mkdir -p ~/Applications
-  rm -rf ~/Applications/ScreenDraw.app
+  rm -rf ~/Applications/ScreenDraw.app ~/Applications/ScreenUtils.app
   cp -R "$APP" ~/Applications/
-  open ~/Applications/ScreenDraw.app
-  echo "installed to ~/Applications/ScreenDraw.app and started (⌥G to draw)"
+  open ~/Applications/ScreenUtils.app
+  echo "installed to ~/Applications/ScreenUtils.app and started (⌥G draw, ⌥⇧S screenshot, ⌥⇧D search)"
 fi

@@ -5,9 +5,18 @@ import ServiceManagement
 import Sparkle
 import WebKit
 
-// A hidden helper (no Dock icon, no menu bar item). ⌥G shows a transparent
-// full-screen drawing overlay on the screen under the mouse; double-tapping
-// Escape (or ⌥G again) clears it and hands focus back to the previous app.
+// A hidden helper (no Dock icon, no menu bar item).
+//
+// ⌥G shows a transparent full-screen drawing overlay on the screen under the
+// mouse; double-tapping Escape (or ⌥G again) clears it and hands focus back to
+// the previous app.
+//
+// ⌥⇧S takes a screenshot and holds it over the screen with a note bar at the
+// bottom (@folder, #tag). Enter saves it to the library (Library.swift), Escape
+// drops it, ⌥G draws on it. While drawing, ⌥⇧S saves the drawing over its
+// screen the same way and goes back to drawing.
+//
+// ⌥⇧D opens the library's search in Raycast (the extension in raycast/).
 
 // A non-activating panel (like Spotlight/Raycast) takes keyboard focus without
 // making the app you were in inactive, so closing it drops you right back.
@@ -65,10 +74,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private var showsSnapshot = true
     private var isCapturing = false
     private var showCount = 0
-    private var hotKeyRef: EventHotKeyRef?
+    private var hotKeyRefs: [EventHotKeyRef] = []
     private var isShown = false
+    // ⌥⇧S: the window is up only to hold a screenshot (no drawing), and
+    // whether the note bar is open (in either mode). `pending` is the image the
+    // note goes with; a note that's sent before it's ready waits in `queuedNote`.
+    private var captureOnly = false
+    private var noteOpen = false
+    private var noteID = 0
+    private var pending: (image: CGImage, kind: String)?
+    private var queuedNote: [String: Any]?
+    private var captureScale: CGFloat = 1
     private var updaterController: SPUStandardUpdaterController?
     private var installUpdate: (() -> Void)?
+
+    // screenutils://draw, screenutils://capture and screenutils://search do
+    // what the shortcuts do. Registered before launch finishes so a URL that
+    // launches the app isn't missed.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(handleURL(_:reply:)),
+            forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
+    }
+
+    @objc private func handleURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let string = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
+              let url = URL(string: string) else { return }
+        // Before the window exists (the URL launched the app), wait for it.
+        guard window != nil else {
+            DispatchQueue.main.async { [weak self] in self?.handleURL(event, reply: reply) }
+            return
+        }
+        switch url.host {
+        case "draw": toggle()
+        case "capture": capture()
+        case "search": openSearch()
+        default: NSLog("ScreenUtils: unknown URL \(string)")
+        }
+    }
+
+    // Opening the app again (Spotlight, Raycast, Finder) toggles drawing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        toggle()
+        return false
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Only one copy runs (e.g. a login item plus a manual launch).
@@ -79,10 +128,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             NSApp.terminate(nil)
             return
         }
+        if moveToNewName() { return }
+        migrateSupportFolder()
         let info = Bundle.main.infoDictionary ?? [:]
-        NSLog("ScreenDraw: started version \(info["CFBundleShortVersionString"] ?? "?") (build \(info["CFBundleVersion"] ?? "?"))")
+        NSLog("ScreenUtils: started version \(info["CFBundleShortVersionString"] ?? "?") (build \(info["CFBundleVersion"] ?? "?"))")
         createWindow()
-        registerHotKey()
+        registerHotKeys()
         NotificationCenter.default.addObserver(
             self, selector: #selector(windowDidResignKey),
             name: NSWindow.didResignKeyNotification, object: window)
@@ -105,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
     func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
                  immediateInstallationBlock: @escaping () -> Void) -> Bool {
-        NSLog("ScreenDraw: downloaded update \(item.displayVersionString)")
+        NSLog("ScreenUtils: downloaded update \(item.displayVersionString)")
         installUpdate = immediateInstallationBlock
         installUpdateIfIdle()
         return true
@@ -122,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                     self.installUpdate = install
                     return
                 }
-                NSLog("ScreenDraw: installing update and relaunching")
+                NSLog("ScreenUtils: installing update and relaunching")
                 install()
             }
         }
@@ -139,13 +190,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private func firstLaunchSetup() {
         let defaults = UserDefaults.standard
         let path = Bundle.main.bundlePath
+        // Moved from ScreenDraw.app while it was a login item (moveToNewName).
+        if defaults.bool(forKey: "reregisterLoginItem") {
+            defaults.removeObject(forKey: "reregisterLoginItem")
+            do { try SMAppService.mainApp.register() } catch { NSLog("ScreenUtils: could not add login item: \(error)") }
+        }
         guard !defaults.bool(forKey: "didFirstLaunch"),
               !path.hasPrefix("/Volumes/"), !path.contains("/AppTranslocation/") else { return }
         defaults.set(true, forKey: "didFirstLaunch")
         do {
             try SMAppService.mainApp.register()
         } catch {
-            NSLog("ScreenDraw: could not add login item: \(error)")
+            NSLog("ScreenUtils: could not add login item: \(error)")
+        }
+    }
+
+    // MARK: Rename from ScreenDraw
+
+    // Sparkle installs updates where the app already is, so a copy installed
+    // as ScreenDraw.app stays that way. The first launch of this version
+    // renames it to ScreenUtils.app and relaunches from there. The bundle ID
+    // is the same, so Screen Recording access and settings carry over.
+    // Returns true when the app is relaunching.
+    private func moveToNewName() -> Bool {
+        let old = Bundle.main.bundleURL
+        let path = old.path
+        guard old.lastPathComponent == "ScreenDraw.app",
+              !path.hasPrefix("/Volumes/"), !path.contains("/AppTranslocation/") else { return false }
+        let new = old.deletingLastPathComponent().appendingPathComponent("ScreenUtils.app")
+        guard !FileManager.default.fileExists(atPath: new.path) else { return false }
+        let wasLoginItem = SMAppService.mainApp.status == .enabled
+        if wasLoginItem { try? SMAppService.mainApp.unregister() }
+        do {
+            try FileManager.default.moveItem(at: old, to: new)
+        } catch {
+            NSLog("ScreenUtils: could not rename \(path): \(error)")
+            if wasLoginItem { try? SMAppService.mainApp.register() }
+            return false
+        }
+        NSLog("ScreenUtils: renamed \(path) to \(new.path), relaunching")
+        if wasLoginItem { UserDefaults.standard.set(true, forKey: "reregisterLoginItem") }
+        // Start the renamed copy once this one has quit, so it isn't turned
+        // away as a second copy.
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = ["-c", "while kill -0 \(getpid()) 2>/dev/null; do sleep 0.1; done; open \"$0\"", new.path]
+        try? relaunch.run()
+        NSApp.terminate(nil)
+        return true
+    }
+
+    // Boards and stills moved from Application Support/ScreenDraw.
+    private func migrateSupportFolder() {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let old = support.appendingPathComponent("ScreenDraw")
+        let new = support.appendingPathComponent("ScreenUtils")
+        guard FileManager.default.fileExists(atPath: old.path),
+              !FileManager.default.fileExists(atPath: new.path) else { return }
+        do { try FileManager.default.moveItem(at: old, to: new) } catch {
+            NSLog("ScreenUtils: could not move \(old.path): \(error)")
         }
     }
 
@@ -190,17 +293,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         if let url = Bundle.main.url(forResource: "overlay", withExtension: "html") {
             webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         } else {
-            NSLog("ScreenDraw: overlay.html missing from bundle")
+            NSLog("ScreenUtils: overlay.html missing from bundle")
         }
     }
 
     // MARK: Artboard history (last 100 boards, kept across restarts)
 
-    private let historyQueue = DispatchQueue(label: "dev.moulik.screendraw.history")
+    private let historyQueue = DispatchQueue(label: "dev.moulik.screenutils.history")
 
     private var historyURL: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return support.appendingPathComponent("ScreenDraw/history.json")
+        return support.appendingPathComponent("ScreenUtils/history.json")
     }
 
     private func loadHistoryJSON() -> String {
@@ -229,7 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try Data(json.utf8).write(to: url, options: .atomic)
             } catch {
-                NSLog("ScreenDraw: could not save history: \(error)")
+                NSLog("ScreenUtils: could not save history: \(error)")
                 return
             }
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
@@ -247,6 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     // MARK: Show / hide
 
     @objc func toggle() {
+        if captureOnly { return drawOnCapture() }
         isShown ? hide() : show()
     }
 
@@ -270,7 +374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             guard let self, self.isShown else { return }
             self.window.makeKeyAndOrderFront(nil)
             self.window.makeFirstResponder(self.webView)
-            NSLog("ScreenDraw: shown (key window: \(self.window.isKeyWindow))")
+            NSLog("ScreenUtils: shown (key window: \(self.window.isKeyWindow))")
         }
     }
 
@@ -280,13 +384,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private func hide() {
         guard isShown else { return }
         isShown = false
+        captureOnly = false
+        endNote()
         window.isEditingText = false
         window.ignoresMouseEvents = true
         let finish = { [weak self] in
             guard let self, !self.isShown, self.window.isVisible else { return }
             self.window.orderOut(nil)
             self.clearSnapshot()
-            NSLog("ScreenDraw: hidden")
+            NSLog("ScreenUtils: hidden")
             self.installUpdateIfIdle()
         }
         webView.callAsyncJavaScript("if (window.SD) await SD.close(); return true;",
@@ -316,6 +422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             saveHistory(json, shots: shots)
         case "background": toggleSnapshot()
         case "board": showBoardShot(body["shot"] as? String)
+        case "note": noteFinished(body)
         default: break
         }
     }
@@ -388,11 +495,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let quality = [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary
             guard let file = CGImageDestinationCreateWithURL(url as CFURL, "public.heic" as CFString, 1, nil) else {
-                NSLog("ScreenDraw: could not save the still")
+                NSLog("ScreenUtils: could not save the still")
                 return
             }
             CGImageDestinationAddImage(file, image, quality)
-            if !CGImageDestinationFinalize(file) { NSLog("ScreenDraw: could not save the still") }
+            if !CGImageDestinationFinalize(file) { NSLog("ScreenUtils: could not save the still") }
         }
     }
 
@@ -428,22 +535,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
 
     private func captureSnapshot(of screen: NSScreen) {
-        guard #available(macOS 14.0, *), !isCapturing,
-              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
-        else { return }
+        guard #available(macOS 14.0, *), !isCapturing else { return }
         isCapturing = true
         let count = showCount
+        captureScreen(screen) { [weak self] image in
+            guard let self, self.showCount == count else { return }
+            self.isCapturing = false
+            self.snapshot = image
+            self.saveSessionShot()
+            if self.boardShot == nil { self.showSessionShot() }
+        }
+    }
+
+    // A picture of the screen at its full resolution, without this app's
+    // windows. Calls back on the main queue, with nil if it failed.
+    private func captureScreen(_ screen: NSScreen, _ done: @escaping (CGImage?) -> Void) {
+        guard #available(macOS 14.0, *),
+              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        else { return done(nil) }
         let width = Int(screen.frame.width * screen.backingScaleFactor)
         let height = Int(screen.frame.height * screen.backingScaleFactor)
-        let finish: (CGImage?, Error?) -> Void = { [weak self] image, error in
-            DispatchQueue.main.async {
-                guard let self, self.showCount == count else { return }
-                self.isCapturing = false
-                if let error { NSLog("ScreenDraw: screen capture failed: \(error)") }
-                self.snapshot = image
-                self.saveSessionShot()
-                if self.boardShot == nil { self.showSessionShot() }
-            }
+        let finish: (CGImage?, Error?) -> Void = { image, error in
+            if let error { NSLog("ScreenUtils: screen capture failed: \(error)") }
+            DispatchQueue.main.async { done(image) }
         }
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
             guard let content, let display = content.displays.first(where: { $0.displayID == displayID }) else {
@@ -461,22 +575,217 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         }
     }
 
-    // MARK: Hotkey (⌥G)
+    // MARK: Screenshots (⌥⇧S)
 
-    private func registerHotKey() {
+    private var takingScreenshot = false
+
+    @objc func capture() {
+        guard !noteOpen, !takingScreenshot else { return }
+        if isShown { return captureDrawing() }
+        guard #available(macOS 14.0, *) else {
+            NSLog("ScreenUtils: screenshots need macOS 14")
+            return
+        }
+        guard CGPreflightScreenCaptureAccess() else { return requestScreenAccess() }
+        guard let screen = screenUnderMouse() else { return }
+        takingScreenshot = true
+        captureScreen(screen) { [weak self] image in
+            guard let self else { return }
+            self.takingScreenshot = false
+            // ⌥G may have opened the drawing layer in the meantime.
+            guard let image, !self.isShown else { return }
+            self.showCapture(image, on: screen)
+        }
+    }
+
+    // Hold the screenshot over the screen with the note bar open.
+    private func showCapture(_ image: CGImage, on screen: NSScreen) {
+        isShown = true
+        captureOnly = true
+        window.ignoresMouseEvents = false
+        clearSnapshot()
+        window.setFrame(screen.frame, display: false)
+        captureScale = screen.backingScaleFactor
+        snapshot = image
+        shown = image
+        shownScale = captureScale
+        updateFrozenView()
+        openNote(kind: "screenshot") { [weak self] _ in
+            guard let self, self.captureOnly else { return }
+            self.pending = (image, "screenshot")
+            self.window.makeKeyAndOrderFront(nil)
+            self.window.makeFirstResponder(self.webView)
+        }
+    }
+
+    // ⌥G on a held screenshot: draw on it, like ⌥G on the screen.
+    private func drawOnCapture() {
+        guard captureOnly else { return }
+        captureOnly = false
+        endNote()
+        sessionShot = "\(UUID().uuidString)@\(max(1, Int(captureScale)))x"
+        webView.evaluateJavaScript("window.SD && SD.show('\(sessionShot)')")
+    }
+
+    // ⌥⇧S while drawing: the drawing over the still it's on (or over the live
+    // screen, taken now), saved with a note. Drawing carries on afterwards.
+    private func captureDrawing() {
+        let id = beginNote()
+        let still = showsSnapshot ? shown.map { (image: $0, scale: shownScale) } : nil
+        let screen = window.screen ?? screenUnderMouse()
+        let points = window.frame.size
+        openNote(kind: "drawing") { [weak self] result in
+            guard let self, self.noteID == id else { return }
+            guard let dataURL = result as? String, let drawing = Self.image(fromDataURL: dataURL) else {
+                NSLog("ScreenUtils: could not export the drawing")
+                return self.endNote()
+            }
+            let finish: ((image: CGImage, scale: CGFloat)?) -> Void = { [weak self] background in
+                guard let self, self.noteID == id else { return }
+                self.pending = (Self.composite(drawing, over: background, points: points), "drawing")
+                if let queued = self.queuedNote { self.saveNote(queued) }
+            }
+            if let still { return finish(still) }
+            guard let screen, CGPreflightScreenCaptureAccess() else { return finish(nil) }
+            let scale = screen.backingScaleFactor
+            self.captureScreen(screen) { finish($0.map { (image: $0, scale: scale) }) }
+        }
+    }
+
+    @discardableResult
+    private func beginNote() -> Int {
+        noteID += 1
+        noteOpen = true
+        pending = nil
+        queuedNote = nil
+        return noteID
+    }
+
+    private func endNote() {
+        noteID += 1
+        noteOpen = false
+        pending = nil
+        queuedNote = nil
+    }
+
+    // The page opens the note bar and, for a drawing, returns it as a PNG.
+    private func openNote(kind: String, then: @escaping (Any?) -> Void) {
+        if kind == "screenshot" { beginNote() }
+        let id = noteID
+        webView.callAsyncJavaScript(
+            "return window.SD ? SD.openNote(kind, suggestions) : null;",
+            arguments: ["kind": kind, "suggestions": Library.shared.suggestions()],
+            in: nil, in: .page) { [weak self] result in
+            guard let self, self.noteID == id else { return }
+            if case .failure(let error) = result { NSLog("ScreenUtils: could not open the note: \(error)") }
+            then(try? result.get())
+        }
+    }
+
+    // From the page: {action: "save", note, folder, tags} or {action: "cancel"}.
+    private func noteFinished(_ body: [String: Any]) {
+        guard noteOpen else { return }
+        guard body["action"] as? String == "save" else {
+            endNote()
+            if captureOnly { hide() }
+            return
+        }
+        // The drawing is still being put together; it saves when it's ready.
+        guard pending != nil else {
+            queuedNote = body
+            return
+        }
+        saveNote(body)
+    }
+
+    private func saveNote(_ body: [String: Any]) {
+        guard let pending else { return }
+        Library.shared.save(
+            pending.image, kind: pending.kind,
+            note: body["note"] as? String ?? "",
+            folder: body["folder"] as? String,
+            tags: body["tags"] as? [String] ?? [])
+        endNote()
+        if captureOnly { hide() }
+    }
+
+    private static func image(fromDataURL url: String) -> CGImage? {
+        guard let comma = url.firstIndex(of: ","),
+              let data = Data(base64Encoded: String(url[url.index(after: comma)...])),
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    // The drawing (at the screen's pixel size) over the still, which keeps the
+    // size it was taken at and sits at the top left, as it does on screen.
+    private static func composite(_ drawing: CGImage, over background: (image: CGImage, scale: CGFloat)?,
+                                  points: CGSize) -> CGImage {
+        let width = drawing.width
+        let height = drawing.height
+        let space = background?.image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }
+            ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return drawing }
+        if let background {
+            let scale = CGFloat(width) / max(1, points.width)
+            let w = CGFloat(background.image.width) / background.scale * scale
+            let h = CGFloat(background.image.height) / background.scale * scale
+            ctx.draw(background.image, in: CGRect(x: 0, y: CGFloat(height) - h, width: w, height: h))
+        }
+        ctx.draw(drawing, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage() ?? drawing
+    }
+
+    // MARK: Search (⌥⇧D)
+
+    @objc func openSearch() {
+        if isShown { hide() }
+        guard let url = URL(string: "raycast://extensions/moulik/screen-utils/search"),
+              NSWorkspace.shared.open(url) else {
+            NSLog("ScreenUtils: could not open Raycast")
+            return
+        }
+    }
+
+    // MARK: Hotkeys (⌥G, ⌥⇧S, ⌥⇧D)
+
+    private func registerHotKeys() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
-            guard let userData else { return noErr }
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
+            guard let userData, let event else { return noErr }
+            var hotKey = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                              nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKey)
             let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
-            DispatchQueue.main.async { delegate.toggle() }
+            DispatchQueue.main.async {
+                switch hotKey.id {
+                case 1: delegate.toggle()
+                case 2: delegate.capture()
+                case 3: delegate.openSearch()
+                default: break
+                }
+            }
             return noErr
         }, 1, &eventType, selfPtr, nil)
 
-        let hotKeyID = EventHotKeyID(signature: OSType(0x5344_5257), id: 1) // "SDRW"
-        let status = RegisterEventHotKey(UInt32(kVK_ANSI_G), UInt32(optionKey), hotKeyID,
-                                         GetApplicationEventTarget(), 0, &hotKeyRef)
-        if status != noErr { NSLog("ScreenDraw: could not register ⌥G (status \(status))") }
+        let keys: [(key: Int, modifiers: Int, name: String)] = [
+            (kVK_ANSI_G, optionKey, "⌥G"),
+            (kVK_ANSI_S, optionKey | shiftKey, "⌥⇧S"),
+            (kVK_ANSI_D, optionKey | shiftKey, "⌥⇧D"),
+        ]
+        for (index, hotKey) in keys.enumerated() {
+            var ref: EventHotKeyRef?
+            let id = EventHotKeyID(signature: OSType(0x5344_5257), id: UInt32(index + 1)) // "SDRW"
+            let status = RegisterEventHotKey(UInt32(hotKey.key), UInt32(hotKey.modifiers), id,
+                                             GetApplicationEventTarget(), 0, &ref)
+            if status != noErr || ref == nil {
+                NSLog("ScreenUtils: could not register \(hotKey.name) (status \(status))")
+            } else if let ref {
+                hotKeyRefs.append(ref)
+            }
+        }
     }
 }
 
