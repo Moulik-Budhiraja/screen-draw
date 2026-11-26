@@ -244,9 +244,6 @@ export function createNoteBar({ onSave, onCancel }) {
       input.value = '';
       root.dataset.kind = kind;
       root.hidden = false;
-      box.classList.remove('note-in');
-      void box.offsetWidth;
-      box.classList.add('note-in');
       update();
       input.focus();
     },

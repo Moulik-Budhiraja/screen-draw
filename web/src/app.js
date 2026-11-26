@@ -1738,23 +1738,12 @@ function openNote(kind, suggestions = {}) {
     S.selected.clear();
     png = exportDrawing();
     dirty();
-  } else {
-    reset();
-    flash();
-  }
+  } else reset();
   noteKind = kind;
   note.open({ kind, folders: suggestions.folders || [], tags: suggestions.tags || [] });
   bridge({ type: 'editing', value: true });
   return png;
 }
-
-// A quick fade, so it's clear the screen was taken.
-const flash = () => {
-  const el = document.createElement('div');
-  el.className = 'flash';
-  document.body.appendChild(el);
-  el.addEventListener('animationend', () => el.remove());
-};
 
 window.SD = {
   reset,
