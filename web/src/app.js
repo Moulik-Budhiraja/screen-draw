@@ -1,6 +1,7 @@
 import rough from 'roughjs';
 import * as G from './geometry.js';
 import { drawElement, font, LINE_HEIGHT, measureWidth, wrapText } from './render.js';
+import { createNoteBar } from './note.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -97,19 +98,38 @@ function render() {
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, innerWidth, innerHeight);
-  const editingId = S.editing?.id;
-  for (const el of S.elements) {
-    if (el.containerId) continue;
-    const alpha = S.erasing.has(el.id) ? 0.2 : 1;
-    drawElement(ctx, rc, el, alpha);
-    if (el.boundTextId && el.boundTextId !== editingId) {
-      const t = byId(el.boundTextId);
-      if (t) drawElement(ctx, rc, t, alpha);
-    }
-  }
+  drawElements(ctx, rc, S.editing?.id);
   drawSelection();
   drawMarquee();
   drawSizeHint();
+}
+
+function drawElements(c, r, editingId = null) {
+  for (const el of S.elements) {
+    if (el.containerId) continue;
+    const alpha = S.erasing.has(el.id) ? 0.2 : 1;
+    drawElement(c, r, el, alpha);
+    if (el.boundTextId && el.boundTextId !== editingId) {
+      const t = byId(el.boundTextId);
+      if (t) drawElement(c, r, t, alpha);
+    }
+  }
+}
+
+// The drawing alone (no selection, transparent elsewhere) at the screen's
+// pixel size, as a PNG data URL, for saving it with ⌥⇧S.
+function exportDrawing() {
+  if (S.editing) commitText();
+  if (S.multi) finishMulti();
+  syncBoundTexts();
+  const dpr = window.devicePixelRatio || 1;
+  const out = document.createElement('canvas');
+  out.width = canvas.width;
+  out.height = canvas.height;
+  const c = out.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawElements(c, rough.canvas(out));
+  return out.toDataURL('image/png');
 }
 
 // Brief preview next to the cursor while scrolling: a line at the new stroke
@@ -144,6 +164,7 @@ function drawSizeHint() {
 
 function onWheel(e) {
   e.preventDefault();
+  if (note.isOpen) return;
   if (e.ctrlKey) return; // pinch gesture
   const px = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
   S.wheelAcc += e.deltaY * px;
@@ -1445,6 +1466,7 @@ const escTap = () => {
 const FKEYS = { F1: 1, F2: 2, F3: 3, F4: 4, F5: 5 };
 
 function onKeyDown(e) {
+  if (note.isOpen) return;
   if (S.editing) {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -1682,15 +1704,57 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 // frame is on screen so the window never re-opens showing the old drawing.
 async function close() {
   saveBoard();
+  note.hide();
   reset();
   await nextFrame();
   await nextFrame();
 }
 
+// ⌥⇧S: a note for a screenshot (the page is empty under it) or for the
+// drawing (returned as a PNG for the app to put over its screen).
+const note = createNoteBar({
+  onSave({ note: text, folder, tags }) {
+    const kind = noteKind;
+    bridge({ type: 'note', action: 'save', note: text, folder, tags });
+    note.close({ saved: kind === 'drawing' });
+    bridge({ type: 'editing', value: false });
+    // Keep the version that was saved in the ↑ history too.
+    if (kind === 'drawing') saveBoard();
+    canvas.focus();
+  },
+  onCancel() {
+    bridge({ type: 'note', action: 'cancel' });
+    note.close();
+    bridge({ type: 'editing', value: false });
+    canvas.focus();
+  },
+});
+let noteKind = null;
+
+// kind: "screenshot", "drawing", or "edit" (an image already saved, with
+// `prefill` holding its note, folder and tags).
+function openNote(kind, suggestions = {}, prefill = null) {
+  let png = null;
+  if (kind === 'drawing') {
+    S.action = null;
+    S.selected.clear();
+    png = exportDrawing();
+    dirty();
+  } else reset();
+  noteKind = kind;
+  note.open({ kind, folders: suggestions.folders || [], tags: suggestions.tags || [], prefill });
+  bridge({ type: 'editing', value: true });
+  return png;
+}
+
 window.SD = {
   reset,
   close,
+  openNote,
+  exportDrawing,
   show(shot) {
+    if (note.isOpen) bridge({ type: 'editing', value: false });
+    note.hide();
     reset();
     boards.shot = shot || null;
     window.focus();

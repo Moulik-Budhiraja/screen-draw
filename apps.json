@@ -9,8 +9,8 @@
   "build": {
     "kind": "native",
     "command": "./scripts/build.sh",
-    "app": "build/ScreenDraw.app",
+    "app": "build/ScreenUtils.app",
     "entitlements": null,
-    "dmgName": "ScreenDraw"
+    "dmgName": "ScreenUtils"
   }
 }
