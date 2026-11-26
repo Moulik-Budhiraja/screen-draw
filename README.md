@@ -7,7 +7,7 @@ It used to be ScreenDraw.
 | --- | --- |
 | **⌥G** | Draw on the screen under your mouse, in Excalidraw's style (rough.js strokes, Excalifont text). **Esc Esc** (double-tap) clears it and drops you back where you were |
 | **⌥⇧S** | Screenshot. It stays over the screen with a note bar at the bottom: type a note, `@folder` to file it, `#tag` to tag it. **Enter** saves, **Esc** drops it, **⌥G** draws on it first. While drawing, ⌥⇧S saves the drawing over its screen the same way |
-| **⌥⇧D** | Search screenshots in Raycast (see [Raycast](#raycast)) |
+| **⌥⇧D** | Search screenshots. This is the Raycast extension's hotkey (see [Raycast](#raycast)) |
 
 ## Screenshots
 
@@ -28,7 +28,7 @@ Folder names with spaces are typed with dashes (`@Bugs-Found` is "Bugs Found").
 cd raycast && npm install && npm run dev   # imports it into Raycast; Ctrl-C when it's loaded
 ```
 
-⌥⇧D opens it (or give **Search Screenshots** its own hotkey in Raycast and drop ⌥⇧D).
+Then give **Search Screenshots** a hotkey in Raycast's settings (Extensions › Screen Utils). I use ⌥⇧D.
 Search matches notes, text in the images, folders, tags and dates. `@folder` and `#tag` filter,
 and typing part of a folder or tag name offers it as a filter; Enter on it applies it, and
 Delete takes it back off. On a screenshot:
@@ -83,7 +83,7 @@ drag line/arrow points to move them and the faint midpoint dots to bend them,
 The first time it runs from Applications, Screen Utils adds itself to Login Items
 (turn that off in System Settings › General › Login Items). Press ⌘Q while drawing to quit.
 Opening the app again (Spotlight, Raycast) also toggles the drawing layer, and
-`screenutils://draw`, `screenutils://capture` and `screenutils://search` do what the shortcuts do.
+`screenutils://draw` and `screenutils://capture` do what the shortcuts do.
 
 ## Build
 

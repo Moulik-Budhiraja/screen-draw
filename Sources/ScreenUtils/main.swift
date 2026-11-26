@@ -16,7 +16,7 @@ import WebKit
 // drops it, ⌥G draws on it. While drawing, ⌥⇧S saves the drawing over its
 // screen the same way and goes back to drawing.
 //
-// ⌥⇧D opens the library's search in Raycast (the extension in raycast/).
+// Searching the library is the Raycast extension in raycast/.
 
 // A non-activating panel (like Spotlight/Raycast) takes keyboard focus without
 // making the app you were in inactive, so closing it drops you right back.
@@ -88,8 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private var updaterController: SPUStandardUpdaterController?
     private var installUpdate: (() -> Void)?
 
-    // screenutils://draw, screenutils://capture and screenutils://search do
-    // what the shortcuts do. Registered before launch finishes so a URL that
+    // screenutils://draw and screenutils://capture do what the shortcuts do. Registered before launch finishes so a URL that
     // launches the app isn't missed.
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSAppleEventManager.shared().setEventHandler(
@@ -108,7 +107,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         switch url.host {
         case "draw": toggle()
         case "capture": capture()
-        case "search": openSearch()
         default: NSLog("ScreenUtils: unknown URL \(string)")
         }
     }
@@ -263,6 +261,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
+        // No zoom-in when it appears: over a screenshot that shows as the
+        // whole screen shrinking and growing back into place.
+        window.animationBehavior = .none
         window.level = .screenSaver
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         window.isReleasedWhenClosed = false
@@ -285,6 +286,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         frozenView = NSView(frame: container.bounds)
         frozenView.wantsLayer = true
         frozenView.layer?.contentsGravity = .resize
+        // The still swaps and resizes in place, never animated.
+        frozenView.layer?.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
         frozenView.isHidden = true
         container.addSubview(frozenView)
         container.addSubview(webView)
@@ -445,12 +448,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     // The still keeps the size it was taken at, from the top left like the
     // drawing, so the two line up even on a screen of another size.
     private func updateFrozenView() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         let image = showsSnapshot ? shown : nil
+        if let image, let bounds = frozenView.superview?.bounds {
+            let size = NSSize(width: CGFloat(image.width) / shownScale, height: CGFloat(image.height) / shownScale)
+            frozenView.frame = NSRect(x: 0, y: bounds.height - size.height, width: size.width, height: size.height)
+        }
         frozenView.layer?.contents = image
         frozenView.isHidden = image == nil
-        guard let image, let bounds = frozenView.superview?.bounds else { return }
-        let size = NSSize(width: CGFloat(image.width) / shownScale, height: CGFloat(image.height) / shownScale)
-        frozenView.frame = NSRect(x: 0, y: bounds.height - size.height, width: size.width, height: size.height)
     }
 
     private func showSessionShot() {
@@ -737,18 +744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         return ctx.makeImage() ?? drawing
     }
 
-    // MARK: Search (⌥⇧D)
-
-    @objc func openSearch() {
-        if isShown { hide() }
-        guard let url = URL(string: "raycast://extensions/moulik/screen-utils/search"),
-              NSWorkspace.shared.open(url) else {
-            NSLog("ScreenUtils: could not open Raycast")
-            return
-        }
-    }
-
-    // MARK: Hotkeys (⌥G, ⌥⇧S, ⌥⇧D)
+    // MARK: Hotkeys (⌥G, ⌥⇧S)
 
     private func registerHotKeys() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -763,7 +759,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                 switch hotKey.id {
                 case 1: delegate.toggle()
                 case 2: delegate.capture()
-                case 3: delegate.openSearch()
                 default: break
                 }
             }
@@ -773,7 +768,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         let keys: [(key: Int, modifiers: Int, name: String)] = [
             (kVK_ANSI_G, optionKey, "⌥G"),
             (kVK_ANSI_S, optionKey | shiftKey, "⌥⇧S"),
-            (kVK_ANSI_D, optionKey | shiftKey, "⌥⇧D"),
         ]
         for (index, hotKey) in keys.enumerated() {
             var ref: EventHotKeyRef?
