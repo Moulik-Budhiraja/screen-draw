@@ -134,57 +134,6 @@ export async function loadLibrary(root: string): Promise<Library> {
   return { root, items, folders, tags };
 }
 
-// Name typed after @: an existing folder's own spelling, or a new safe name.
-export function resolveFolder(folders: string[], typed: string | null): string | null {
-  const name = typed?.trim();
-  if (!name) return null;
-  const existing = folders.find((f) => norm(f) === norm(name));
-  if (existing) return existing;
-  const safe = name.replace(/[/:]/g, "-").replace(/^\.+/, "").slice(0, 64);
-  return safe || null;
-}
-
-const resolveTags = (known: string[], typed: string[]) => typed.map((t) => known.find((k) => norm(k) === norm(t)) ?? t);
-
-async function freeName(dir: string, name: string) {
-  const ext = path.extname(name);
-  const base = name.slice(0, name.length - ext.length);
-  for (let n = 1; ; n++) {
-    const candidate = n === 1 ? name : `${base} (${n})${ext}`;
-    try {
-      await fs.access(path.join(dir, candidate));
-    } catch {
-      return candidate;
-    }
-  }
-}
-
-// Change an image's note, tags and folder. Moving folders moves the file.
-// Returns the item's new path.
-export async function editItem(
-  lib: Library,
-  item: Item,
-  change: { note: string; folder: string | null; tags: string[] },
-): Promise<string> {
-  const folder = resolveFolder(lib.folders, change.folder);
-  const tags = resolveTags(lib.tags, change.tags);
-  let rel = item.rel;
-  if (folder !== item.folder) {
-    const dir = folder ? path.join(lib.root, folder) : lib.root;
-    await fs.mkdir(dir, { recursive: true });
-    const name = await freeName(dir, item.name);
-    await fs.rename(item.path, path.join(dir, name));
-    rel = folder ? `${folder}/${name}` : name;
-  }
-  await updateIndex(lib.root, (items) => {
-    const entry: Entry = { ...(items[item.rel] ?? {}) };
-    if (!entry.createdAt) entry.createdAt = item.createdAt;
-    delete items[item.rel];
-    items[rel] = { ...entry, note: change.note, tags };
-  });
-  return path.join(lib.root, rel);
-}
-
 // After the file itself is gone (moved to the Trash).
 export async function forgetItem(lib: Library, item: Item) {
   await updateIndex(lib.root, (items) => {

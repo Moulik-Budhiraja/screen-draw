@@ -1,21 +1,22 @@
 import {
   Action,
   ActionPanel,
+  closeMainWindow,
   Color,
-  Form,
   getPreferenceValues,
   Icon,
   Keyboard,
   List,
+  open,
   showToast,
   Toast,
   trash,
-  useNavigation,
 } from "@raycast/api";
 import { useCachedPromise } from "@raycast/utils";
 import { useMemo, useState } from "react";
-import { editItem, expandHome, forgetItem, type Item, type Library, loadLibrary } from "./library";
-import { applyToken, matches, noteText, parseNote, parseQuery, suggest } from "./query";
+import { expandHome, forgetItem, type Item, type Library, loadLibrary } from "./library";
+import { applyToken, match, Match, parseQuery, suggest } from "./query";
+import { describeSpan } from "./when";
 
 const MAX_SUGGESTIONS = 5;
 
@@ -29,7 +30,19 @@ export default function Command() {
   const [showingDetail, setShowingDetail] = useState(true);
 
   const query = useMemo(() => parseQuery(searchText), [searchText]);
-  const results = useMemo(() => (lib ? lib.items.filter((item) => matches(item, query)) : []), [lib, query]);
+  // What you typed for an image (note, folder, tags) ranks above the text
+  // read off it.
+  const [labeled, textOnly] = useMemo(() => {
+    const byLabel: Item[] = [];
+    const byText: Item[] = [];
+    for (const item of lib?.items ?? []) {
+      const m = match(item, query);
+      if (m === Match.Label) byLabel.push(item);
+      else if (m === Match.Text) byText.push(item);
+    }
+    return [byLabel, byText];
+  }, [lib, query]);
+  const results = labeled.length + textOnly.length;
 
   // Folders and tags to pick: for a half-typed @ or #, or a word that
   // names one. Picking one turns it into a filter in the search text.
@@ -52,13 +65,23 @@ export default function Command() {
     return found.slice(0, MAX_SUGGESTIONS).map((s) => ({ ...s, count: count(s) }));
   }, [lib, query]);
 
-  const sections = useMemo(() => groupByDate(results), [results]);
+  // A time phrase gets one section saying what it was read as.
+  const sections = useMemo((): Section[] => {
+    const main: Section[] = query.span
+      ? labeled.length
+        ? [{ title: query.span.label, subtitle: describeSpan(query.span), items: labeled }]
+        : []
+      : groupByDate(labeled);
+    if (textOnly.length)
+      main.push({ title: "Text in Screenshots", subtitle: String(textOnly.length), items: textOnly });
+    return main;
+  }, [labeled, textOnly, query]);
   const applySuggestion = (s: Suggestion) => setSearchText(applyToken(searchText, s.kind, s.name));
 
   return (
     <List
       isLoading={isLoading}
-      isShowingDetail={showingDetail && results.length > 0}
+      isShowingDetail={showingDetail && results > 0}
       filtering={false}
       searchText={searchText}
       onSearchTextChange={setSearchText}
@@ -91,8 +114,8 @@ export default function Command() {
           ))}
         </List.Section>
       )}
-      {sections.map(([title, items]) => (
-        <List.Section key={title} title={title}>
+      {sections.map(({ title, subtitle, items }) => (
+        <List.Section key={title} title={title} subtitle={subtitle}>
           {items.map((item) => (
             <ItemRow
               key={item.path}
@@ -106,11 +129,17 @@ export default function Command() {
           ))}
         </List.Section>
       ))}
-      {!isLoading && results.length === 0 && suggestions.length === 0 && (
+      {!isLoading && results === 0 && suggestions.length === 0 && (
         <List.EmptyView
           icon={Icon.Image}
           title={lib?.items.length ? "No matches" : "No screenshots yet"}
-          description={lib?.items.length ? undefined : "Press ⌥⇧S to take one"}
+          description={
+            !lib?.items.length
+              ? "Press ⌥⇧S to take one"
+              : query.span
+                ? `${query.span.label}: ${describeSpan(query.span)}`
+                : undefined
+          }
         />
       )}
     </List>
@@ -166,11 +195,15 @@ function ItemRow(props: {
             />
           </ActionPanel.Section>
           <ActionPanel.Section>
-            <Action.Push
-              title="Edit Note"
+            <Action
+              title="Rename or Edit Note"
               icon={Icon.Pencil}
               shortcut={Keyboard.Shortcut.Common.Edit}
-              target={<EditNote item={item} lib={lib} onSaved={props.reload} />}
+              onAction={async () => {
+                // The app shows the image with its note bar, as after ⌥⇧S.
+                await closeMainWindow();
+                await open(`screenutils://edit?file=${encodeURIComponent(item.path)}`);
+              }}
             />
             {item.folder && (
               <Action
@@ -233,36 +266,11 @@ function ItemDetail({ item }: { item: Item }) {
   );
 }
 
-function EditNote(props: { item: Item; lib: Library; onSaved: () => void }) {
-  const { pop } = useNavigation();
-  return (
-    <Form
-      navigationTitle="Edit Note"
-      actions={
-        <ActionPanel>
-          <Action.SubmitForm
-            title="Save"
-            onSubmit={async (values: { text: string }) => {
-              try {
-                await editItem(props.lib, props.item, parseNote(values.text));
-                props.onSaved();
-                pop();
-              } catch (error) {
-                await showToast({ style: Toast.Style.Failure, title: "Could not save", message: String(error) });
-              }
-            }}
-          />
-        </ActionPanel>
-      }
-    >
-      <Form.TextField id="text" title="Note" defaultValue={noteText(props.item)} placeholder="Note  @folder  #tag" />
-    </Form>
-  );
-}
-
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-function groupByDate(items: Item[]): [string, Item[]][] {
+type Section = { title: string; subtitle?: string; items: Item[] };
+
+function groupByDate(items: Item[]): Section[] {
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
   const today = startOfToday.getTime();
@@ -273,12 +281,12 @@ function groupByDate(items: Item[]): [string, Item[]][] {
     if (ms >= today - 6 * day) return "This Week";
     return new Date(ms).toLocaleDateString("en-US", { month: "long", year: "numeric" });
   };
-  const groups: [string, Item[]][] = [];
+  const groups: Section[] = [];
   for (const item of items) {
     const title = label(item.createdAt);
     const last = groups[groups.length - 1];
-    if (last && last[0] === title) last[1].push(item);
-    else groups.push([title, [item]]);
+    if (last && last.title === title) last.items.push(item);
+    else groups.push({ title, items: [item] });
   }
   return groups;
 }

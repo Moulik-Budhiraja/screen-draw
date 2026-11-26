@@ -1,18 +1,17 @@
 // The note bar shown after ⌥⇧S, at the bottom center of the screen. Plain
 // words are the note, `@name` puts the image in that folder and `#name` tags
 // it. Typing either opens a list of existing folders or tags to pick from.
-// Enter saves, Escape drops it.
+// Picking one, or typing a space after the name, turns it into a chip where
+// it stands; Backspace takes a chip out whole. Enter saves, Escape drops it.
 //
-// The input's own text is transparent; a copy of it behind (the mirror) is
-// what you see, so @folder and #tag can be colored.
+// When editing a saved image (Raycast's Rename or Edit Note), its folder and
+// tags start as chips at the front and its note is selected, so typing
+// replaces the note and keeps the chips.
 
 const MAX_SUGGESTIONS = 6;
 
 // "My Folder", "my-folder" and "my_folder" are the same name.
 export const norm = (s) => s.toLowerCase().replace(/[\s_-]+/g, '-');
-
-// Words with no spaces, so a folder with spaces is typed with dashes.
-const tokenText = (name) => name.trim().replace(/\s+/g, '-');
 
 export function parseNote(text) {
   let folder = null;
@@ -23,7 +22,7 @@ export function parseNote(text) {
     if (word[0] === '@') {
       if (word.length > 1) folder = word.slice(1);
     } else if (word[0] === '#') {
-      if (word.length > 1 && !tags.some((t) => norm(t) === norm(word.slice(1)))) tags.push(word.slice(1));
+      if (word.length > 1) tags.push(word.slice(1));
     } else words.push(word);
   }
   return { note: words.join(' '), folder, tags };
@@ -57,6 +56,7 @@ const rank = (names, query) => {
 const escapeHTML = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
 const FOLDER_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M1.5 4.25A1.75 1.75 0 0 1 3.25 2.5h2.7c.46 0 .9.18 1.23.51l.81.81c.14.14.33.22.53.22h4.23c.97 0 1.75.78 1.75 1.75v5.96c0 .97-.78 1.75-1.75 1.75h-9.5c-.97 0-1.75-.78-1.75-1.75V4.25Z"/></svg>';
+const iconFor = (kind) => (kind === '@' ? FOLDER_ICON : '<span class="note-hash">#</span>');
 
 export function createNoteBar({ onSave, onCancel }) {
   const root = document.createElement('div');
@@ -67,8 +67,7 @@ export function createNoteBar({ onSave, onCancel }) {
     <div class="note-box">
       <div class="note-suggest" hidden></div>
       <div class="note-field">
-        <div class="note-mirror"><span class="note-mirror-text"></span></div>
-        <input class="note-input" type="text" spellcheck="false" autocomplete="off" placeholder="Note  @folder  #tag">
+        <div class="note-edit" contenteditable="true" spellcheck="false" autocorrect="off" autocapitalize="off" data-placeholder="Note  @folder  #tag"></div>
       </div>
     </div>
     <div class="note-toast" hidden>Saved</div>`;
@@ -76,8 +75,7 @@ export function createNoteBar({ onSave, onCancel }) {
 
   const scrim = root.querySelector('.note-scrim');
   const box = root.querySelector('.note-box');
-  const input = root.querySelector('.note-input');
-  const mirror = root.querySelector('.note-mirror-text');
+  const edit = root.querySelector('.note-edit');
   const list = root.querySelector('.note-suggest');
   const toast = root.querySelector('.note-toast');
 
@@ -87,29 +85,57 @@ export function createNoteBar({ onSave, onCancel }) {
     tags: [],
     items: [], // current suggestions: { name, isNew }
     active: 0,
-    token: null,
-    dismissed: null, // the token text whose list Escape closed
+    token: null, // { kind, start, end, query, word, node }
+    dismissed: null, // the word whose list Escape closed
     toastTimer: 0,
   };
 
-  const renderMirror = () => {
-    const text = input.value;
-    const caretToken = activeToken(text, input.selectionStart ?? text.length);
-    let html = '';
-    let at = 0;
-    for (const part of text.split(/(\s+)/)) {
-      const start = at;
-      at += part.length;
-      if (part.length > 1 && (part[0] === '@' || part[0] === '#')) {
-        const cls = part[0] === '@' ? 'tok-folder' : 'tok-tag';
-        const mark = caretToken && caretToken.start === start ? ' data-active="1"' : '';
-        html += `<span class="${cls}"${mark}>${escapeHTML(part)}</span>`;
-      } else if (caretToken && caretToken.start === start) {
-        html += `<span data-active="1">${escapeHTML(part)}</span>`;
-      } else html += escapeHTML(part);
-    }
-    mirror.innerHTML = html;
-    mirror.style.transform = `translateX(${-input.scrollLeft}px)`;
+  const known = (kind, name) => {
+    const names = kind === '@' ? state.folders : state.tags;
+    return names.find((n) => norm(n) === norm(name)) ?? name;
+  };
+
+  const makeChip = (kind, name) => {
+    const chip = document.createElement('span');
+    chip.className = `chip ${kind === '@' ? 'chip-folder' : 'chip-tag'}`;
+    chip.contentEditable = 'false';
+    chip.dataset.kind = kind;
+    chip.dataset.name = name;
+    chip.innerHTML = `<span class="chip-icon">${iconFor(kind)}</span>${escapeHTML(name)}`;
+    return chip;
+  };
+
+  const placeCaret = (node, offset) => {
+    const range = document.createRange();
+    range.setStart(node, offset);
+    range.collapse(true);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  };
+
+  // The text node the caret is in, and where.
+  const caret = () => {
+    const sel = getSelection();
+    if (!sel.rangeCount || !sel.isCollapsed) return null;
+    const { startContainer: node, startOffset: offset } = sel.getRangeAt(0);
+    if (node.nodeType !== Node.TEXT_NODE || !edit.contains(node)) return null;
+    return { node, offset };
+  };
+
+  // Swaps the characters start..end of a text node for a chip, with one
+  // space after it and the caret after that. One folder at a time.
+  const chipify = (node, start, end, kind, name) => {
+    if (kind === '@') edit.querySelectorAll('.chip-folder').forEach((c) => c.remove());
+    const text = node.textContent;
+    const after = document.createTextNode(` ${text.slice(end).replace(/^ /, '')}`);
+    node.textContent = text.slice(0, start);
+    const chip = makeChip(kind, known(kind, name));
+    node.after(chip, after);
+    placeCaret(after, 1);
+    state.dismissed = null;
+    state.active = 0;
+    update();
   };
 
   const renderList = () => {
@@ -118,70 +144,74 @@ export function createNoteBar({ onSave, onCancel }) {
       return;
     }
     list.hidden = false;
-    list.innerHTML = state.items.map((item, i) => {
-      const icon = state.token.kind === '@' ? FOLDER_ICON : '<span class="note-hash">#</span>';
-      return `<div class="note-row${i === state.active ? ' active' : ''}" data-i="${i}">
-        <span class="note-icon">${icon}</span><span class="note-name">${escapeHTML(item.name)}</span>${item.isNew ? '<span class="note-new">New</span>' : ''}
-      </div>`;
-    }).join('');
+    list.innerHTML = state.items.map((item, i) => `<div class="note-row${i === state.active ? ' active' : ''}" data-i="${i}">
+        <span class="note-icon">${iconFor(state.token.kind)}</span><span class="note-name">${escapeHTML(item.name)}</span>${item.isNew ? '<span class="note-new">New</span>' : ''}
+      </div>`).join('');
     // Line the list up with the word being typed.
-    const marker = mirror.querySelector('[data-active]');
-    const field = input.getBoundingClientRect();
-    const x = marker ? marker.getBoundingClientRect().left - field.left - 10 : 0;
+    const range = document.createRange();
+    range.setStart(state.token.node, state.token.start);
+    range.collapse(true);
+    const field = edit.getBoundingClientRect();
+    const x = range.getBoundingClientRect().left - field.left - 10;
     const maxX = Math.max(0, field.width - list.offsetWidth);
     list.style.left = `${Math.min(Math.max(0, x), maxX)}px`;
   };
 
   const update = () => {
-    const caret = input.selectionStart ?? input.value.length;
-    const token = activeToken(input.value, caret);
-    state.token = token;
+    const empty = !edit.textContent.trim() && !edit.querySelector('.chip');
+    edit.classList.toggle('empty', empty);
+    // A stray <br> is what's left once everything is deleted.
+    if (empty) edit.querySelectorAll('br').forEach((br) => br.remove());
+    const at = caret();
+    const token = at && activeToken(at.node.textContent, at.offset);
+    state.token = token ? { ...token, node: at.node } : null;
     state.items = [];
     if (token && token.word !== state.dismissed) {
       const names = token.kind === '@' ? state.folders : state.tags;
       state.items = rank(names, token.query).slice(0, MAX_SUGGESTIONS).map((name) => ({ name }));
       const q = token.query.trim();
       if (q && !names.some((n) => norm(n) === norm(q))) state.items.push({ name: q, isNew: true });
-      // Nothing to pick when the one match is what's already typed.
-      if (state.items.length === 1 && `${token.kind}${tokenText(state.items[0].name)}` === token.word) state.items = [];
     }
     if (state.active >= state.items.length) state.active = 0;
-    renderMirror();
     renderList();
   };
 
   const accept = (item) => {
     const t = state.token;
-    if (!t || !item) return;
-    const text = input.value;
-    const insert = `${t.kind}${tokenText(item.name)}`;
-    const after = text.slice(t.end);
-    const spacer = after.startsWith(' ') ? '' : ' ';
-    input.value = text.slice(0, t.start) + insert + spacer + after;
-    const caret = t.start + insert.length + 1;
-    input.setSelectionRange(caret, caret);
-    state.active = 0;
-    update();
+    if (t && item) chipify(t.node, t.start, t.end, t.kind, item.name);
   };
 
-  // What the highlighted suggestion would change the word into, if anything.
-  const pendingCompletion = () => {
-    const t = state.token;
-    const item = state.items[state.active];
-    if (!t || !item || list.hidden) return null;
-    const insert = `${t.kind}${tokenText(item.name)}`;
-    return insert === t.word ? null : item;
+  // A space typed right after "@name" or "#name" makes it a chip.
+  const chipifyBeforeCaret = () => {
+    const at = caret();
+    if (!at) return;
+    const before = at.node.textContent.slice(0, at.offset);
+    const m = before.match(/(^|\s)([@#])([^\s@#]+)\s$/);
+    if (!m) return;
+    const start = at.offset - m[0].length + m[1].length;
+    chipify(at.node, start, at.offset, m[2], m[3]);
   };
 
-  const resolved = () => {
-    const parsed = parseNote(input.value);
-    // Use an existing folder's or tag's own spelling.
-    if (parsed.folder) parsed.folder = state.folders.find((f) => norm(f) === norm(parsed.folder)) ?? parsed.folder;
-    parsed.tags = parsed.tags.map((t) => state.tags.find((x) => norm(x) === norm(t)) ?? t);
-    return parsed;
+  const values = () => {
+    let folder = null;
+    let tags = [];
+    let text = '';
+    for (const node of edit.childNodes) {
+      if (node.classList?.contains('chip')) {
+        text += ' ';
+        if (node.dataset.kind === '@') folder = node.dataset.name;
+        else tags.push(node.dataset.name);
+      } else text += node.textContent;
+    }
+    // Names still typed out (no space after them yet) count too.
+    const typed = parseNote(text);
+    if (typed.folder) folder = known('@', typed.folder);
+    tags = [...tags, ...typed.tags.map((t) => known('#', t))];
+    tags = tags.filter((t, i) => tags.findIndex((x) => norm(x) === norm(t)) === i);
+    return { note: typed.note, folder, tags };
   };
 
-  input.addEventListener('keydown', (e) => {
+  edit.addEventListener('keydown', (e) => {
     if (e.isComposing) return;
     e.stopPropagation();
     const listOpen = !list.hidden && state.items.length > 0;
@@ -196,9 +226,10 @@ export function createNoteBar({ onSave, onCancel }) {
       if (listOpen) accept(state.items[state.active]);
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      const completion = !(e.metaKey || e.ctrlKey) && pendingCompletion();
-      if (completion) accept(completion);
-      else onSave(resolved());
+      // Enter picks a suggestion first, unless it's already what's typed.
+      const item = listOpen && !(e.metaKey || e.ctrlKey) && state.items[state.active];
+      if (item && `${state.token.kind}${item.name}` !== state.token.word) accept(item);
+      else onSave(values());
     } else if (e.key === 'Escape') {
       e.preventDefault();
       if (listOpen) {
@@ -207,13 +238,23 @@ export function createNoteBar({ onSave, onCancel }) {
       } else onCancel();
     }
   });
-  input.addEventListener('input', () => {
+  edit.addEventListener('beforeinput', (e) => {
+    // One line of plain text.
+    if (e.inputType.startsWith('format') || e.inputType === 'insertParagraph' || e.inputType === 'insertLineBreak') {
+      e.preventDefault();
+    }
+  });
+  edit.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const text = e.clipboardData.getData('text/plain').replace(/\s+/g, ' ');
+    document.execCommand('insertText', false, text);
+  });
+  edit.addEventListener('input', (e) => {
     state.dismissed = null;
     state.active = 0;
+    if (e.inputType === 'insertText' && /\s$/.test(e.data ?? '')) chipifyBeforeCaret();
     update();
   });
-  // Moving the caret into or out of a word changes the list.
-  for (const type of ['keyup', 'click', 'select', 'scroll']) input.addEventListener(type, () => update());
   document.addEventListener('selectionchange', () => state.open && update());
 
   list.addEventListener('mousedown', (e) => {
@@ -224,16 +265,34 @@ export function createNoteBar({ onSave, onCancel }) {
   // Clicks anywhere else keep the caret in the note.
   for (const el of [scrim, box]) {
     el.addEventListener('mousedown', (e) => {
-      if (e.target !== input) e.preventDefault();
-      input.focus();
+      if (edit.contains(e.target)) return;
+      e.preventDefault();
+      edit.focus();
     });
   }
+
+  // Folder and tags as chips at the front, then the note, selected.
+  const fill = ({ note = '', folder = '', tags = [] } = {}) => {
+    edit.innerHTML = '';
+    const chips = [...(folder ? [makeChip('@', folder)] : []), ...tags.map((t) => makeChip('#', t))];
+    for (const chip of chips) edit.append(chip, document.createTextNode(' '));
+    const text = document.createTextNode(note);
+    edit.append(text);
+    edit.focus();
+    if (note) {
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      const sel = getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } else placeCaret(text, 0);
+  };
 
   return {
     get isOpen() {
       return state.open;
     },
-    open({ folders = [], tags = [], kind = 'screenshot' } = {}) {
+    open({ folders = [], tags = [], kind = 'screenshot', prefill = null } = {}) {
       clearTimeout(state.toastTimer);
       toast.hidden = true;
       state.open = true;
@@ -241,16 +300,15 @@ export function createNoteBar({ onSave, onCancel }) {
       state.tags = tags;
       state.dismissed = null;
       state.active = 0;
-      input.value = '';
       root.dataset.kind = kind;
       root.hidden = false;
+      fill(prefill ?? {});
       update();
-      input.focus();
     },
     close({ saved = false } = {}) {
       if (!state.open) return;
       state.open = false;
-      input.blur();
+      edit.blur();
       list.hidden = true;
       if (saved) {
         scrim.hidden = true;

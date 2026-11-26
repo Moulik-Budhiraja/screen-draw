@@ -1731,7 +1731,9 @@ const note = createNoteBar({
 });
 let noteKind = null;
 
-function openNote(kind, suggestions = {}) {
+// kind: "screenshot", "drawing", or "edit" (an image already saved, with
+// `prefill` holding its note, folder and tags).
+function openNote(kind, suggestions = {}, prefill = null) {
   let png = null;
   if (kind === 'drawing') {
     S.action = null;
@@ -1740,7 +1742,7 @@ function openNote(kind, suggestions = {}) {
     dirty();
   } else reset();
   noteKind = kind;
-  note.open({ kind, folders: suggestions.folders || [], tags: suggestions.tags || [] });
+  note.open({ kind, folders: suggestions.folders || [], tags: suggestions.tags || [], prefill });
   bridge({ type: 'editing', value: true });
   return png;
 }

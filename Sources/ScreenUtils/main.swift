@@ -83,12 +83,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private var noteOpen = false
     private var noteID = 0
     private var pending: (image: CGImage, kind: String)?
+    // The library path of the image being edited (screenutils://edit).
+    private var editPath: String?
     private var queuedNote: [String: Any]?
     private var captureScale: CGFloat = 1
     private var updaterController: SPUStandardUpdaterController?
     private var installUpdate: (() -> Void)?
 
-    // screenutils://draw and screenutils://capture do what the shortcuts do. Registered before launch finishes so a URL that
+    // screenutils://draw and screenutils://capture do what the shortcuts do.
+    // screenutils://edit?file=<path> opens the note bar for an image in the
+    // library (the Raycast extension's Rename or Edit Note). Registered before launch finishes so a URL that
     // launches the app isn't missed.
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSAppleEventManager.shared().setEventHandler(
@@ -107,6 +111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         switch url.host {
         case "draw": toggle()
         case "capture": capture()
+        case "edit":
+            let file = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "file" })?.value
+            if let file { edit(URL(fileURLWithPath: file)) }
         default: NSLog("ScreenUtils: unknown URL \(string)")
         }
     }
@@ -137,6 +145,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             name: NSWindow.didResignKeyNotification, object: window)
         firstLaunchSetup()
         startUpdater()
+        // Read the text in images that don't have it yet, now and then.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { Library.shared.readMissingText() }
+        Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { _ in Library.shared.readMissingText() }
     }
 
     // MARK: Updates
@@ -353,7 +364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     // MARK: Show / hide
 
     @objc func toggle() {
-        if captureOnly { return drawOnCapture() }
+        if captureOnly { return editPath == nil ? drawOnCapture() : hide() }
         isShown ? hide() : show()
     }
 
@@ -388,6 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         guard isShown else { return }
         isShown = false
         captureOnly = false
+        editPath = nil
         endNote()
         window.isEditingText = false
         window.ignoresMouseEvents = true
@@ -607,21 +619,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
     // Hold the screenshot over the screen with the note bar open.
     private func showCapture(_ image: CGImage, on screen: NSScreen) {
+        showHeld(image, on: screen, kind: "screenshot", scale: screen.backingScaleFactor)
+    }
+
+    private func showHeld(_ image: CGImage, on screen: NSScreen, kind: String, scale: CGFloat,
+                          prefill: [String: Any] = [:]) {
         isShown = true
         captureOnly = true
         window.ignoresMouseEvents = false
         clearSnapshot()
         window.setFrame(screen.frame, display: false)
-        captureScale = screen.backingScaleFactor
+        captureScale = scale
         snapshot = image
         shown = image
         shownScale = captureScale
         updateFrozenView()
-        openNote(kind: "screenshot") { [weak self] _ in
+        openNote(kind: kind, prefill: prefill) { [weak self] _ in
             guard let self, self.captureOnly else { return }
-            self.pending = (image, "screenshot")
+            self.pending = (image, kind)
             self.window.makeKeyAndOrderFront(nil)
             self.window.makeFirstResponder(self.webView)
+        }
+    }
+
+    // An image from the library, held over the screen like a new screenshot,
+    // with its folder and tags as chips and its note selected.
+    private func edit(_ file: URL) {
+        guard !takingScreenshot else { return }
+        if isShown {
+            hide()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.edit(file) }
+            return
+        }
+        guard let entry = Library.shared.entry(forFile: file) else {
+            NSLog("ScreenUtils: \(file.path) isn't in the library")
+            return
+        }
+        guard let screen = screenUnderMouse() else { return }
+        takingScreenshot = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let options = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+            let image = CGImageSourceCreateWithURL(file as CFURL, nil)
+                .flatMap { CGImageSourceCreateImageAtIndex($0, 0, options) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.takingScreenshot = false
+                guard let image, !self.isShown else { return }
+                // Shown at the screen's own scale, or smaller if it wouldn't fit.
+                let scale = max(screen.backingScaleFactor,
+                                CGFloat(image.width) / screen.frame.width,
+                                CGFloat(image.height) / screen.frame.height)
+                self.editPath = entry.path
+                self.showHeld(image, on: screen, kind: "edit", scale: scale, prefill: [
+                    "note": entry.note, "folder": entry.folder ?? "", "tags": entry.tags,
+                ])
+            }
         }
     }
 
@@ -676,12 +728,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
 
     // The page opens the note bar and, for a drawing, returns it as a PNG.
-    private func openNote(kind: String, then: @escaping (Any?) -> Void) {
-        if kind == "screenshot" { beginNote() }
+    private func openNote(kind: String, prefill: [String: Any] = [:], then: @escaping (Any?) -> Void) {
+        if kind != "drawing" { beginNote() }
         let id = noteID
         webView.callAsyncJavaScript(
-            "return window.SD ? SD.openNote(kind, suggestions) : null;",
-            arguments: ["kind": kind, "suggestions": Library.shared.suggestions()],
+            "return window.SD ? SD.openNote(kind, suggestions, prefill) : null;",
+            arguments: ["kind": kind, "suggestions": Library.shared.suggestions(), "prefill": prefill],
             in: nil, in: .page) { [weak self] result in
             guard let self, self.noteID == id else { return }
             if case .failure(let error) = result { NSLog("ScreenUtils: could not open the note: \(error)") }
@@ -707,11 +759,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
     private func saveNote(_ body: [String: Any]) {
         guard let pending else { return }
-        Library.shared.save(
-            pending.image, kind: pending.kind,
-            note: body["note"] as? String ?? "",
-            folder: body["folder"] as? String,
-            tags: body["tags"] as? [String] ?? [])
+        let note = body["note"] as? String ?? ""
+        let folder = body["folder"] as? String
+        let tags = body["tags"] as? [String] ?? []
+        if pending.kind == "edit" {
+            if let editPath { Library.shared.update(editPath, note: note, folder: folder, tags: tags) }
+        } else {
+            Library.shared.save(pending.image, kind: pending.kind, note: note, folder: folder, tags: tags)
+        }
         endNote()
         if captureOnly { hide() }
     }

@@ -131,12 +131,7 @@ final class Library {
             let tags = resolveTags(tags)
             let dir = folder.map { root.appendingPathComponent($0, isDirectory: true) } ?? root
             let base = "\(kind == "drawing" ? "Drawing" : "Screenshot") \(Library.nameFormat.string(from: date))"
-            var url = dir.appendingPathComponent(base + ".png")
-            var n = 2
-            while FileManager.default.fileExists(atPath: url.path) {
-                url = dir.appendingPathComponent("\(base) (\(n)).png")
-                n += 1
-            }
+            let url = Library.freeURL(in: dir, name: base + ".png")
             do {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             } catch {
@@ -164,14 +159,133 @@ final class Library {
             NSLog("ScreenUtils: saved \(path)")
             // Reading the text takes a moment; the next save needn't wait for it.
             DispatchQueue.global(qos: .utility).async { [self] in
-                let text = recognizeText(in: image)
-                guard !text.isEmpty else { return }
-                queue.async { [self] in
-                    // Unless the extension has moved or deleted it since.
-                    guard readItems()[path] != nil else { return }
-                    updateItem(path) { $0["text"] = text }
-                }
+                storeText(recognizeText(in: image), for: path)
             }
+        }
+    }
+
+    // `text` is stored even when empty, so an image is only read once.
+    private func storeText(_ text: String, for path: String) {
+        queue.async { [self] in
+            // Unless the extension has moved or deleted it since.
+            guard FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path) else { return }
+            updateItem(path) { $0["text"] = text }
+        }
+    }
+
+    private static func freeURL(in dir: URL, name: String) -> URL {
+        let ext = (name as NSString).pathExtension
+        let base = (name as NSString).deletingPathExtension
+        var url = dir.appendingPathComponent(name)
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = dir.appendingPathComponent("\(base) (\(n))" + (ext.isEmpty ? "" : ".\(ext)"))
+            n += 1
+        }
+        return url
+    }
+
+    // MARK: Reading text in older images
+
+    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "heic", "gif", "webp", "tif", "tiff"]
+    private var readingText = false
+
+    // Images in the library, as paths relative to the root.
+    private func imagePaths() -> [String] {
+        let fm = FileManager.default
+        let isImage = { (name: String) in
+            !name.hasPrefix(".") && Library.imageExtensions.contains((name as NSString).pathExtension.lowercased())
+        }
+        var paths: [String] = []
+        for name in (try? fm.contentsOfDirectory(atPath: root.path)) ?? [] where !name.hasPrefix(".") {
+            var isDir: ObjCBool = false
+            fm.fileExists(atPath: root.appendingPathComponent(name).path, isDirectory: &isDir)
+            if isDir.boolValue {
+                let sub = (try? fm.contentsOfDirectory(atPath: root.appendingPathComponent(name).path)) ?? []
+                paths += sub.filter(isImage).map { "\(name)/\($0)" }
+            } else if isImage(name) {
+                paths.append(name)
+            }
+        }
+        return paths
+    }
+
+    // Reads the text in images that don't have it yet: ones dropped into the
+    // library in Finder, or saved before the app quit mid-read. One at a time,
+    // in the background.
+    func readMissingText() {
+        queue.async { [self] in
+            guard !readingText else { return }
+            let items = readItems()
+            let missing = imagePaths().filter { items[$0]?["text"] == nil }
+            guard !missing.isEmpty else { return }
+            readingText = true
+            NSLog("ScreenUtils: reading text in \(missing.count) images")
+            DispatchQueue.global(qos: .utility).async { [self] in
+                for path in missing {
+                    let url = root.appendingPathComponent(path)
+                    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                          let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
+                    storeText(recognizeText(in: image), for: path)
+                }
+                queue.async { [self] in readingText = false }
+            }
+        }
+    }
+
+    // MARK: Editing
+
+    struct Entry {
+        let path: String // relative to the root
+        let note: String
+        let folder: String?
+        let tags: [String]
+    }
+
+    // The library's record of an image file, if the file is in the library.
+    func entry(forFile file: URL) -> Entry? {
+        let rootPath = root.resolvingSymlinksInPath().path + "/"
+        let filePath = file.standardizedFileURL.resolvingSymlinksInPath().path
+        guard filePath.hasPrefix(rootPath), FileManager.default.fileExists(atPath: filePath) else { return nil }
+        let path = String(filePath.dropFirst(rootPath.count))
+        let parts = path.split(separator: "/").map(String.init)
+        guard (1...2).contains(parts.count), !parts.contains(where: { $0.hasPrefix(".") }) else { return nil }
+        let item = readItems()[path] ?? [:]
+        return Entry(path: path, note: item["note"] as? String ?? "",
+                     folder: parts.count == 2 ? parts[0] : nil, tags: item["tags"] as? [String] ?? [])
+    }
+
+    // Changes an image's note, tags and folder. A new folder moves the file.
+    func update(_ path: String, note: String, folder typedFolder: String?, tags typedTags: [String]) {
+        queue.async { [self] in
+            let folder = resolveFolder(typedFolder)
+            let tags = resolveTags(typedTags)
+            let old = root.appendingPathComponent(path)
+            let created = try? old.resourceValues(forKeys: [.creationDateKey]).creationDate
+            let parts = path.split(separator: "/").map(String.init)
+            var newPath = path
+            if folder != (parts.count == 2 ? parts[0] : nil) {
+                let dir = folder.map { root.appendingPathComponent($0, isDirectory: true) } ?? root
+                let url = Library.freeURL(in: dir, name: old.lastPathComponent)
+                do {
+                    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    try FileManager.default.moveItem(at: old, to: url)
+                } catch {
+                    NSLog("ScreenUtils: could not move \(path): \(error)")
+                    return
+                }
+                newPath = folder.map { "\($0)/\(url.lastPathComponent)" } ?? url.lastPathComponent
+            }
+            var items = readItems()
+            var item = items.removeValue(forKey: path) ?? [:]
+            if item["createdAt"] == nil, let created {
+                item["createdAt"] = (created.timeIntervalSince1970 * 1000).rounded()
+            }
+            item["note"] = note
+            item["tags"] = tags
+            items[newPath] = item
+            do { try writeItems(items) } catch { NSLog("ScreenUtils: could not save the library index: \(error)") }
+            NSLog("ScreenUtils: edited \(newPath)")
         }
     }
 

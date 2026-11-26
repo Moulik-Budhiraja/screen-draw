@@ -14,11 +14,13 @@ It used to be ScreenDraw.
 Screenshots are PNGs in `~/Pictures/Screen Utils`, one subfolder per `@folder`
 (`defaults write dev.moulik.screendraw libraryPath /some/folder` to move it).
 Notes, tags and the text read off each image live in `.screenutils.json` in that folder.
-Folders you make in Finder show up as `@folder`s, and images you drop in show up in search.
+Folders you make in Finder show up as `@folder`s. Images you drop in show up in search,
+and the app reads their text in the background (at launch and every 30 minutes).
 
 In the note bar, `@` and `#` list existing folders and tags as you type: **↑↓** to move,
-**Tab** (or **Enter**) to pick. A name that doesn't exist yet makes a new folder or tag.
-Folder names with spaces are typed with dashes (`@Bugs-Found` is "Bugs Found").
+**Tab** (or **Enter**) to pick. Picking one, or typing a space after the name, turns it into a
+chip where it stands, and Backspace removes a chip whole. A name that doesn't exist yet makes a
+new folder or tag. Folder names with spaces are typed with dashes (`@Bugs-Found` is "Bugs Found").
 
 ## Raycast
 
@@ -29,9 +31,13 @@ cd raycast && npm install && npm run dev   # imports it into Raycast; Ctrl-C whe
 ```
 
 Then give **Search Screenshots** a hotkey in Raycast's settings (Extensions › Screen Utils). I use ⌥⇧D.
-Search matches notes, text in the images, folders, tags and dates. `@folder` and `#tag` filter,
-and typing part of a folder or tag name offers it as a filter; Enter on it applies it, and
-Delete takes it back off. On a screenshot:
+Search matches notes, folders, tags and file names first, then text read off the images
+(listed below them under **Text in Screenshots**). `@folder` and `#tag` filter, and typing part
+of a folder or tag name offers it as a filter; Enter on it applies it, and Delete takes it back
+off. Time phrases filter by when it was taken, and the list says what they were read as:
+`today`, `yesterday`, `this morning`, `last night`, `last 3 hours`, `2d`, `4 days ago`,
+`monday`, `last friday`, `since tuesday`, `this week`, `last month`, `nov 20`, `11/20`,
+`october 2025`. They combine with words and filters (`login @Work yesterday`). On a screenshot:
 
 | Key | Action |
 | --- | --- |
@@ -39,7 +45,7 @@ Delete takes it back off. On a screenshot:
 | ⌘⇧C | Copy it |
 | ⌘Y | Quick Look |
 | ⌘⇧P | Show or hide the preview |
-| ⌘E | Edit the note, folder and tags (same `@` `#` syntax; changing the folder moves the file) |
+| ⌘E | Rename or edit the note. The app shows the image with the note bar: folder and tags as chips at the front, the note selected so typing replaces it. A new folder moves the file |
 | ⌘F | Show only its folder |
 | ⌘O / ⌘⇧F | Open / show in Finder |
 | ⌃X | Move it to the Trash |
@@ -83,7 +89,8 @@ drag line/arrow points to move them and the faint midpoint dots to bend them,
 The first time it runs from Applications, Screen Utils adds itself to Login Items
 (turn that off in System Settings › General › Login Items). Press ⌘Q while drawing to quit.
 Opening the app again (Spotlight, Raycast) also toggles the drawing layer, and
-`screenutils://draw` and `screenutils://capture` do what the shortcuts do.
+`screenutils://draw` and `screenutils://capture` do what the shortcuts do, and
+`screenutils://edit?file=<path>` opens the note bar for an image in the library.
 
 ## Build
 
